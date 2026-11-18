@@ -1,0 +1,16 @@
+[package]
+name = "pcbcraft-application"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+description = "Use cases for pcbcraft"
+
+[dependencies]
+pcbcraft-domain = { path = "../domain" }
+anyhow = "1"
+csv = "1"
+jsonschema = "0.26"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

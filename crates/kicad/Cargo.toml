@@ -1,0 +1,18 @@
+[package]
+name = "pcbcraft-kicad"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+description = "KiCad CLI and file adapters"
+
+[dependencies]
+pcbcraft-application = { path = "../application" }
+pcbcraft-domain = { path = "../domain" }
+anyhow = "1"
+quick-xml = "0.37"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"
+sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }

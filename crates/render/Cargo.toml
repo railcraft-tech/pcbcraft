@@ -1,0 +1,14 @@
+[package]
+name = "pcbcraft-render"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+description = "PDF drawing renderer"
+
+[dependencies]
+pcbcraft-domain = { path = "../domain" }
+anyhow = "1"
+png = "0.17"
+printpdf = { version = "0.7", features = ["svg"] }
+tiny-skia = "0.11"

@@ -1,0 +1,13 @@
+[package]
+name = "pcbcraft-suppliers"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+description = "LCSC and PCBWay catalog clients"
+
+[dependencies]
+pcbcraft-domain = { path = "../domain" }
+anyhow = "1"
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls"] }

@@ -1,6 +1,6 @@
 # Geometry
 
-`Geometry` reads a `.kicad_pcb` file and returns board-space outlines in millimetres, Y up, the same axes as pcbnew. It does not call `kicad-cli` and it does not write KiCad files. The s-expression reader is the one in `crates/kicad`. The parser does not depend on the CLI. `dump` and `is-occupied` are two consumers of the same shapes.
+`Geometry` reads a `.kicad_pcb` file and returns board-space outlines in millimetres, Y up, the same axes as pcbnew. It does not call `kicad-cli` and it does not write KiCad files. The s-expression reader is the one in `crates/kicad`. The parser does not depend on the CLI. `dump`, `is-occupied`, and `find-symbol` are consumers of the same shapes. `export 2d` reads the same shapes when it frames one footprint.
 
 Footprint graphics are stored in the footprint's local coordinates. A footprint on `B.Cu` is mirrored in X before its rotation is applied. Pad outlines are built at the pad, then transformed with the footprint. An arc stays an arc: three points still define it after that transform.
 
@@ -45,9 +45,23 @@ The JSON carries the verdict, the four distances with the layer and source that 
 
 `is-occupied` prints JSON to stdout. `dump` does too, unless `--format png` or `--output` says otherwise. Both resolve the project the same way as the other commands.
 
+## `geometry find-symbol`
+
+`pcbcraft geometry find-symbol J1` keeps the shapes whose reference is `J1`: pads, courtyard, holes, and graphics of that footprint. A name that matches nothing is the error `no symbol 'J1'`.
+
+The JSON matches `dump`: `unit`, `window`, and `layers`, plus `reference`. `window` is the occupied outline of those shapes. The clearance halo is not part of the window.
+
+## `export 2d`
+
+`pcbcraft export 2d` renders an orthographic view through `kicad-cli pcb render`, without perspective, as a square PNG. `--side` is `front` or `back` and defaults to `front`. KiCad receives that as `--side top` or `--side bottom`. `--width` is the image side in pixels and defaults to 1024. The file is `<stem>-2d.png`, or `<stem>-back-2d.png` for the back. With `--symbol J1` it is `<stem>-J1-2d.png`. `-o` sets the path.
+
+`--symbol J1 --around-space 2mm` frames a square around that footprint. The same lookup as `find-symbol` supplies the occupied window. The margin is added on every side. The square side is the longer side after that expansion, and the centre stays the centre of the symbol. `2` and `2mm` both mean 2 mm. Another unit is an error. `--around-space` without `--symbol` is an error. A symbol without a margin uses 5 mm. The face comes from that footprint: a `B.CrtYd` courtyard selects the back, and so does a footprint whose layers are only `B.*`. Pads on both copper sides stay on the front unless the courtyard says otherwise. `--side` does not override that choice.
+
+KiCad has no millimetre crop, so the camera is aimed instead. `--pivot` is the offset from the board centre to the square centre, in centimetres. `--zoom` is `max(board width, board height) / square side`. A zoom of 1 is the whole board. The board centre comes from `Edge.Cuts`, or from every shape when the outline is missing. Without `--symbol` the command renders the whole board.
+
 ## Cache
 
-Geometry is always built for the whole board, then `dump` and `is-occupied` filter that result. The filter is the same one as a direct parse: a window keeps shapes whose occupied or clearance bounds meet it, and `--all` is what adds the non-blocking graphics. `--detailed` samples `points` at print time, so the cache does not store them.
+Geometry is always built for the whole board, then `dump`, `is-occupied`, and `find-symbol` filter that result. The filter is the same one as a direct parse: a window keeps shapes whose occupied or clearance bounds meet it, and `--all` is what adds the non-blocking graphics. `--detailed` samples `points` at print time, so the cache does not store them.
 
 The cache lives next to the project:
 

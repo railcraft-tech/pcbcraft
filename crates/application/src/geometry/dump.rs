@@ -141,6 +141,43 @@ fn outline_json(outline: &Outline, options: DumpOptions) -> Result<Value, Geomet
     Ok(value)
 }
 
+/// Shapes that belong to one footprint, with a window around their occupied outlines.
+pub fn symbol_view<'a>(
+    board: &'a BoardGeometry,
+    reference: &str,
+) -> Result<(Window, Vec<&'a Shape>), GeometryError> {
+    let shapes: Vec<&Shape> = board
+        .shapes
+        .iter()
+        .filter(|shape| shape.reference.as_deref() == Some(reference))
+        .collect();
+    let window = pcbcraft_domain::geometry::occupied_window(&shapes)
+        .ok_or_else(|| GeometryError::NoSymbol(reference.to_string()))?;
+    Ok((window, shapes))
+}
+
+pub fn find_symbol(board: &BoardGeometry, reference: &str) -> Result<Value, GeometryError> {
+    let (window, shapes) = symbol_view(board, reference)?;
+    let mut layers: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for shape in shapes {
+        layers
+            .entry(shape.layer.clone())
+            .or_default()
+            .push(shape_json(shape, DumpOptions::default())?);
+    }
+    Ok(json!({
+        "unit": "mm",
+        "reference": reference,
+        "window": {
+            "xMin": window.x_min,
+            "xMax": window.x_max,
+            "yMin": window.y_min,
+            "yMax": window.y_max,
+        },
+        "layers": layers,
+    }))
+}
+
 /// Rebuild shapes from a full-board dump. `points` are ignored.
 pub fn board_from_dump(value: &Value) -> Result<BoardGeometry, GeometryError> {
     let layers = value
@@ -420,5 +457,64 @@ mod tests {
             &track.clearance,
             Point::new(5.0, 0.2)
         ));
+    }
+
+    #[test]
+    fn find_symbol_keeps_one_footprint_and_ignores_its_clearance_halo() {
+        let board = BoardGeometry {
+            copper_layers: vec!["F.Cu".into()],
+            shapes: vec![
+                Shape {
+                    source: Source::Pad,
+                    layer: "F.Cu".into(),
+                    reference: Some("J1".into()),
+                    pad: Some("1".into()),
+                    net: None,
+                    width: None,
+                    blocks: true,
+                    clearance_class: ClearanceClass::None,
+                    clearance_mm: 1.0,
+                    inset: false,
+                    inward: false,
+                    occupied: Outline::Circle {
+                        center: Point::new(5.0, 2.0),
+                        radius: 1.0,
+                    },
+                    clearance: Outline::Circle {
+                        center: Point::new(5.0, 2.0),
+                        radius: 4.0,
+                    },
+                },
+                Shape {
+                    source: Source::Pad,
+                    layer: "F.Cu".into(),
+                    reference: Some("R1".into()),
+                    pad: Some("1".into()),
+                    net: None,
+                    width: None,
+                    blocks: true,
+                    clearance_class: ClearanceClass::None,
+                    clearance_mm: 0.0,
+                    inset: false,
+                    inward: false,
+                    occupied: Outline::Circle {
+                        center: Point::new(0.0, 0.0),
+                        radius: 1.0,
+                    },
+                    clearance: Outline::Circle {
+                        center: Point::new(0.0, 0.0),
+                        radius: 1.0,
+                    },
+                },
+            ],
+        };
+        let value = find_symbol(&board, "J1").unwrap();
+        assert_eq!(value["reference"], "J1");
+        assert!((value["window"]["xMin"].as_f64().unwrap() - 4.0).abs() < 1e-9);
+        assert!((value["window"]["xMax"].as_f64().unwrap() - 6.0).abs() < 1e-9);
+        let pads = value["layers"]["F.Cu"].as_array().unwrap();
+        assert_eq!(pads.len(), 1);
+        assert_eq!(pads[0]["ref"], "J1");
+        assert!(find_symbol(&board, "U1").is_err());
     }
 }

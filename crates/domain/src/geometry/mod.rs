@@ -14,6 +14,10 @@ pub enum GeometryError {
     BadWindow(String),
     #[error("cached geometry cannot be read")]
     BadCache,
+    #[error("no symbol '{0}'")]
+    NoSymbol(String),
+    #[error("length '{0}' is not a number of millimetres")]
+    BadLength(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -288,6 +292,158 @@ pub fn union_window(shapes: &[&Shape]) -> Window {
             y_max: 0.0,
         },
     }
+}
+
+/// Smallest window that contains every occupied outline. Clearance halos are ignored.
+pub fn occupied_window(shapes: &[&Shape]) -> Option<Window> {
+    let mut bounds: Option<Bounds> = None;
+    for shape in shapes {
+        let next = outline_bounds(&shape.occupied);
+        bounds = Some(match bounds {
+            Some(mut so_far) => {
+                so_far.include(Point::new(next.min_x, next.min_y));
+                so_far.include(Point::new(next.max_x, next.max_y));
+                so_far
+            }
+            None => next,
+        });
+    }
+    bounds.map(|bounds| Window {
+        x_min: bounds.min_x,
+        x_max: bounds.max_x,
+        y_min: bounds.min_y,
+        y_max: bounds.max_y,
+    })
+}
+
+/// Square that contains `bounds` plus `margin_mm` on every side.
+/// The centre stays the centre of `bounds`.
+pub fn square_around(bounds: Window, margin_mm: f64) -> Window {
+    let width = (bounds.x_max - bounds.x_min) + 2.0 * margin_mm;
+    let height = (bounds.y_max - bounds.y_min) + 2.0 * margin_mm;
+    let side = width.max(height);
+    let center_x = (bounds.x_min + bounds.x_max) / 2.0;
+    let center_y = (bounds.y_min + bounds.y_max) / 2.0;
+    let half = side / 2.0;
+    Window {
+        x_min: center_x - half,
+        x_max: center_x + half,
+        y_min: center_y - half,
+        y_max: center_y + half,
+    }
+}
+
+/// Camera for an orthographic `pcb render` that fills the image with `square`.
+/// Pivot is centimetres from the board centre, matching `kicad-cli pcb render --pivot`.
+/// Zoom 1 shows the whole board, so the zoom is the board span divided by the square side.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderFrame {
+    pub pivot_x_cm: f64,
+    pub pivot_y_cm: f64,
+    pub zoom: f64,
+}
+
+pub fn render_frame(board: Window, square: Window) -> RenderFrame {
+    let board_x = (board.x_min + board.x_max) / 2.0;
+    let board_y = (board.y_min + board.y_max) / 2.0;
+    let square_x = (square.x_min + square.x_max) / 2.0;
+    let square_y = (square.y_min + square.y_max) / 2.0;
+    let board_span = (board.x_max - board.x_min).max(board.y_max - board.y_min);
+    let side = (square.x_max - square.x_min).max(square.y_max - square.y_min);
+    RenderFrame {
+        pivot_x_cm: (square_x - board_x) / 10.0,
+        pivot_y_cm: (square_y - board_y) / 10.0,
+        zoom: if side.abs() < EPS {
+            1.0
+        } else {
+            board_span / side
+        },
+    }
+}
+
+/// `2`, `2mm`, and `2 mm` are millimetres. Any other unit is rejected.
+pub fn parse_millimetres(text: &str) -> Result<f64, GeometryError> {
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let lower = compact.to_ascii_lowercase();
+    let number = lower.strip_suffix("mm").unwrap_or(&lower);
+    if number.is_empty() || number.chars().any(|c| c.is_ascii_alphabetic()) {
+        return Err(GeometryError::BadLength(text.to_string()));
+    }
+    let value: f64 = number
+        .parse()
+        .map_err(|_| GeometryError::BadLength(text.to_string()))?;
+    if value < 0.0 {
+        return Err(GeometryError::BadLength(text.to_string()));
+    }
+    Ok(value)
+}
+
+/// Board outline when Edge.Cuts exists, otherwise every occupied shape.
+pub fn board_window(board: &BoardGeometry) -> Window {
+    let edges: Vec<&Shape> = board
+        .shapes
+        .iter()
+        .filter(|shape| shape.source == Source::Edge)
+        .collect();
+    if let Some(window) = occupied_window(&edges) {
+        return window;
+    }
+    occupied_window(&board.shapes.iter().collect::<Vec<_>>()).unwrap_or(Window {
+        x_min: 0.0,
+        x_max: 0.0,
+        y_min: 0.0,
+        y_max: 0.0,
+    })
+}
+
+/// Which face of the board a render shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Face {
+    Front,
+    Back,
+}
+
+impl Face {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "front" => Some(Self::Front),
+            "back" => Some(Self::Back),
+            _ => None,
+        }
+    }
+
+    /// `kicad-cli pcb render --side` name for this face.
+    pub fn render_side(self) -> &'static str {
+        match self {
+            Self::Front => "top",
+            Self::Back => "bottom",
+        }
+    }
+}
+
+/// Face of one footprint. A back courtyard decides it. Otherwise every
+/// `B.*` layer and no `F.*` layer means the back. Copper on both sides,
+/// as on a through-hole pad, stays on the front unless the courtyard says so.
+pub fn symbol_face(shapes: &[&Shape]) -> Face {
+    let courtyard_back = shapes.iter().any(|shape| is_courtyard(&shape.layer, 'B'));
+    let courtyard_front = shapes.iter().any(|shape| is_courtyard(&shape.layer, 'F'));
+    if courtyard_back && !courtyard_front {
+        return Face::Back;
+    }
+    if courtyard_front {
+        return Face::Front;
+    }
+    let back = shapes.iter().any(|shape| shape.layer.starts_with('B'));
+    let front = shapes.iter().any(|shape| shape.layer.starts_with('F'));
+    if back && !front {
+        Face::Back
+    } else {
+        Face::Front
+    }
+}
+
+fn is_courtyard(layer: &str, face: char) -> bool {
+    layer.starts_with(face) && layer.contains("CrtYd")
 }
 
 pub fn point_blocked(shape: &Shape, point: Point) -> bool {
@@ -1231,6 +1387,89 @@ mod tests {
         assert_eq!(window.x_min, -10.0);
         assert_eq!(window.x_max, -5.0);
         assert_eq!(window.y_max, 40.0);
+    }
+
+    #[test]
+    fn a_margin_makes_a_square_around_the_same_centre() {
+        let bounds = Window {
+            x_min: 0.0,
+            x_max: 10.0,
+            y_min: 0.0,
+            y_max: 4.0,
+        };
+        let square = square_around(bounds, 2.0);
+        assert!((square.x_max - square.x_min - 14.0).abs() < 1e-9);
+        assert!((square.y_max - square.y_min - 14.0).abs() < 1e-9);
+        assert!(((square.x_min + square.x_max) / 2.0 - 5.0).abs() < 1e-9);
+        assert!(((square.y_min + square.y_max) / 2.0 - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn render_frame_points_the_camera_at_the_square() {
+        let board = Window {
+            x_min: 0.0,
+            x_max: 100.0,
+            y_min: 0.0,
+            y_max: 50.0,
+        };
+        let square = Window {
+            x_min: 40.0,
+            x_max: 54.0,
+            y_min: 18.0,
+            y_max: 32.0,
+        };
+        let frame = render_frame(board, square);
+        assert!((frame.pivot_x_cm - -0.3).abs() < 1e-9);
+        assert!(frame.pivot_y_cm.abs() < 1e-9);
+        assert!((frame.zoom - 100.0 / 14.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn millimetres_accept_a_bare_number_and_mm() {
+        assert!((parse_millimetres("2mm").unwrap() - 2.0).abs() < 1e-9);
+        assert!((parse_millimetres("2 mm").unwrap() - 2.0).abs() < 1e-9);
+        assert!((parse_millimetres("2").unwrap() - 2.0).abs() < 1e-9);
+        assert!(parse_millimetres("2cm").is_err());
+    }
+
+    #[test]
+    fn a_back_courtyard_selects_the_back_even_when_pads_are_on_both_sides() {
+        let shapes = [
+            face_shape("F.Cu"),
+            face_shape("B.Cu"),
+            face_shape("B.CrtYd"),
+        ];
+        let borrowed: Vec<&Shape> = shapes.iter().collect();
+        assert_eq!(symbol_face(&borrowed), Face::Back);
+        assert_eq!(symbol_face(&[&shapes[0], &shapes[1]]), Face::Front);
+        let back_pad = face_shape("B.Cu");
+        let front_yard = face_shape("F.CrtYd");
+        assert_eq!(symbol_face(&[&back_pad]), Face::Back);
+        assert_eq!(symbol_face(&[&front_yard]), Face::Front);
+    }
+
+    fn face_shape(layer: &str) -> Shape {
+        Shape {
+            source: Source::Pad,
+            layer: layer.into(),
+            reference: Some("J1".into()),
+            pad: None,
+            net: None,
+            width: None,
+            blocks: true,
+            clearance_class: ClearanceClass::None,
+            clearance_mm: 0.0,
+            inset: false,
+            inward: false,
+            occupied: Outline::Circle {
+                center: Point::new(0.0, 0.0),
+                radius: 1.0,
+            },
+            clearance: Outline::Circle {
+                center: Point::new(0.0, 0.0),
+                radius: 1.0,
+            },
+        }
     }
 
     #[test]

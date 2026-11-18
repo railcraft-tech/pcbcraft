@@ -34,7 +34,14 @@ pub fn parse_board(text: &str) -> Result<BoardGeometry> {
             Some("via") => shapes.extend(via_shapes(item, &copper, &nets)?),
             Some("zone") => shapes.extend(zone_shapes(item, &nets)?),
             Some(name) if name.starts_with("gr_") => {
-                graphic(item, Place::identity(), &mut shapes, &mut edge_lines, true)?;
+                graphic(
+                    item,
+                    Place::identity(),
+                    &mut shapes,
+                    &mut edge_lines,
+                    None,
+                    true,
+                )?;
             }
             _ => {}
         }
@@ -172,7 +179,14 @@ fn footprint(
             Some("pad") => shapes.extend(pad_shapes(item, &place, copper, mask, &reference)?),
             Some("zone") => shapes.extend(zone_shapes(item, nets)?),
             Some(name) if name.starts_with("fp_") => {
-                graphic(item, place, shapes, edge_lines, false)?;
+                graphic(
+                    item,
+                    place,
+                    shapes,
+                    edge_lines,
+                    reference.as_deref(),
+                    false,
+                )?;
             }
             _ => {}
         }
@@ -484,6 +498,7 @@ fn graphic(
     place: Place,
     shapes: &mut Vec<Shape>,
     edge_lines: &mut Vec<(Point, Point)>,
+    reference: Option<&str>,
     board_level: bool,
 ) -> Result<()> {
     let layer = child_atom(expr, "layer").unwrap_or("").to_string();
@@ -663,7 +678,7 @@ fn graphic(
                     } else {
                         place.map_point(end)
                     };
-                    edge_lines_like_courtyard(shapes, &layer, start, end, width);
+                    edge_lines_like_courtyard(shapes, &layer, reference, start, end, width);
                 }
             }
         }
@@ -680,7 +695,7 @@ fn graphic(
     shapes.push(make_shape(
         source,
         layer,
-        None,
+        reference.map(str::to_string),
         None,
         None,
         if width > 0.0 { Some(width) } else { None },
@@ -699,6 +714,7 @@ fn graphic(
 fn edge_lines_like_courtyard(
     shapes: &mut Vec<Shape>,
     layer: &str,
+    reference: Option<&str>,
     start: Point,
     end: Point,
     width: f64,
@@ -706,7 +722,7 @@ fn edge_lines_like_courtyard(
     shapes.push(make_shape(
         Source::Courtyard,
         layer.to_string(),
-        None,
+        reference.map(str::to_string),
         None,
         None,
         Some(width),
@@ -1226,6 +1242,7 @@ mod tests {
             .find(|shape| shape.source == Source::Courtyard)
             .unwrap();
         assert!(contains(&yard.occupied, Point::new(10.0, 10.0)));
+        assert_eq!(yard.reference.as_deref(), Some("R1"));
         let hole = board
             .shapes
             .iter()

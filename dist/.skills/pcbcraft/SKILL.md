@@ -19,6 +19,8 @@ Use the `pcbcraft` binary. Do not edit `.kicad_sch`, `.kicad_pcb`, or `.kicad_pr
 - `pcbcraft export cpl <project.kicad_pro> --local corrections.yaml` writes the five-column JLCPCB CPL. A second run on an already corrected file mirrors the bottom again. Pass a fresh KiCad position file, not the previous CPL.
 - `pcbcraft export gerbers <project.kicad_pro> -o board.zip`
 - `pcbcraft export drawing <project.kicad_pro>` puts side above back on one A4 page. `--side side` or `--side back` selects one face. `--full` asks for color.
+- `pcbcraft export 2d <project.kicad_pro>` writes a square PNG of the orthographic 3D view. `--side front` or `--side back` selects the face and defaults to `front`. `--symbol J1` frames that footprint and picks the face from its geometry. `--around-space` defaults to 5 mm.
+- `pcbcraft geometry find-symbol J1` prints the shapes of that one footprint.
 
 `--local` points at a YAML file of the same shape as `longfred-v1a.yaml`.
 

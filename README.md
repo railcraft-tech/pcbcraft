@@ -10,6 +10,8 @@ pcbcraft export pos <project.kicad_pro>
 pcbcraft export cpl <project.kicad_pro> --local corrections.yaml
 pcbcraft export gerbers <project.kicad_pro> -o board.zip
 pcbcraft export drawing <project.kicad_pro>
+pcbcraft export 2d <project.kicad_pro> --symbol J1 --around-space 2mm
+pcbcraft geometry find-symbol J1
 pcbcraft tests run
 pcbcraft parts alternatives spec.yaml
 pcbcraft components sync <project.kicad_pro>
@@ -20,6 +22,8 @@ pcbcraft net GND dump
 `export bom` writes a JLCPCB-shaped bill of materials. `export pos` writes the raw KiCad position CSV. `export cpl` corrects rotation and offset, then writes the five JLCPCB columns. Run CPL on a fresh position file: a second pass mirrors the bottom again.
 
 `export drawing` puts the front above the back on one landscape A4 page at 1:1. `--side side` or `--side back` selects one face. `--full` adds color.
+
+`export 2d` writes a square PNG of the orthographic 3D view. `--side` is `front` or `back` and defaults to `front`. `--symbol J1` frames that footprint and picks the face from its geometry. `--around-space` defaults to 5 mm. `geometry find-symbol J1` prints the shapes of that one footprint.
 
 `tests run` reads `tests/pcbcraft/**/*.json`. Each file names a validator (`ERCValidator`, `DRCValidator`, or `PartAvailability`) and a `spec`. Pass another directory as `pcbcraft tests run <dir>`. `pcbcraft tests run --name erc-test` runs that one file and still runs its subtests. The name is the file path relative to the test directory, without `.json`. `pcbcraft tests init defaults` creates that directory, if it is missing, with `erc-test.json`, `drc-test.json`, and `availability-test.json`. The generated availability test sets `defaultMinimum` to 10. `pcbcraft tests init type ERCValidator my-check` writes `my-check.json` for that type. Both the type and the file name are required. `pcbcraft tests list` prints the tests in the directory, then the types the program can run. `pcbcraft.yaml` in the current directory can list lines to skip under `tests.skipped`, for example `VoltageRating.C21`. A skipped line is printed and does not fail the run.
 

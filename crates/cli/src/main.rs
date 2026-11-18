@@ -95,6 +95,9 @@ enum ExportKind {
     Gerbers(FileArgs),
     /// 2D drawing on A4.
     Drawing(DrawingArgs),
+    /// Orthographic render of the 3D view.
+    #[command(name = "2d")]
+    TwoD(TwoDArgs),
 }
 
 #[derive(Subcommand)]
@@ -164,6 +167,28 @@ struct DrawingArgs {
     full: bool,
     #[arg(long)]
     board: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct TwoDArgs {
+    /// A .kicad_pro, .kicad_sch, or .kicad_pcb file.
+    input: Option<PathBuf>,
+    #[arg(long)]
+    board: Option<PathBuf>,
+    /// Footprint reference to frame, for example J1.
+    #[arg(long)]
+    symbol: Option<String>,
+    /// `front` or `back`. With --symbol, the footprint chooses the face.
+    #[arg(long, default_value = "front")]
+    side: String,
+    /// Extra space around the symbol. Defaults to 5mm. Requires --symbol.
+    #[arg(long)]
+    around_space: Option<String>,
+    /// Square image side in pixels.
+    #[arg(long, default_value_t = 1024)]
+    width: u32,
+    #[arg(short, long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -295,6 +320,7 @@ fn run() -> Result<()> {
             ExportKind::Cpl(args) => export_cpl(args),
             ExportKind::Gerbers(args) => export_gerbers(args),
             ExportKind::Drawing(args) => export_drawing(args),
+            ExportKind::TwoD(args) => export_2d(args),
         },
         Command::Tests { kind } => dispatch_tests(kind),
         Command::Parts { kind } => match kind {
@@ -488,6 +514,43 @@ fn export_drawing(args: DrawingArgs) -> Result<()> {
     } else {
         PdfRenderer.mechanical(&page, &geometry, &output)?;
     }
+    eprintln!("Wrote {}", output.display());
+    Ok(())
+}
+
+fn export_2d(args: TwoDArgs) -> Result<()> {
+    if args.around_space.is_some() && args.symbol.is_none() {
+        bail!("--around-space requires --symbol");
+    }
+    let project = resolve(args.input.as_deref(), None, args.board.as_deref())?;
+    let board = project.board.as_ref().context("no board")?;
+    require_file(board, "board")?;
+    let requested = pcbcraft_domain::geometry::Face::parse(&args.side)
+        .with_context(|| format!("--side must be front or back, not '{}'", args.side))?;
+    let (frame, face) = if let Some(symbol) = &args.symbol {
+        let margin = match &args.around_space {
+            Some(text) => pcbcraft_domain::geometry::parse_millimetres(text)?,
+            None => 5.0,
+        };
+        let geometry = geometry_cmd::load_geometry(args.input.as_deref(), args.board.as_deref())?;
+        let (bounds, shapes) = pcbcraft_application::geometry::symbol_view(&geometry, symbol)?;
+        let square = pcbcraft_domain::geometry::square_around(bounds, margin);
+        let board_window = pcbcraft_domain::geometry::board_window(&geometry);
+        let frame = pcbcraft_domain::geometry::render_frame(board_window, square);
+        let face = pcbcraft_domain::geometry::symbol_face(&shapes);
+        (Some(frame), face)
+    } else {
+        (None, requested)
+    };
+    let output = args.output.unwrap_or_else(|| {
+        let suffix = match (&args.symbol, face) {
+            (Some(symbol), _) => format!("{symbol}-2d.png"),
+            (None, pcbcraft_domain::geometry::Face::Back) => "back-2d.png".into(),
+            (None, pcbcraft_domain::geometry::Face::Front) => "2d.png".into(),
+        };
+        PathBuf::from(format!("{}-{suffix}", project.stem()))
+    });
+    KiCad::from_env().render_top(board, &output, args.width, face.render_side(), frame)?;
     eprintln!("Wrote {}", output.display());
     Ok(())
 }

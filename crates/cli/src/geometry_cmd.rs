@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use pcbcraft_application::geometry::{
-    dump_json, dump_view, occupied_json, DumpOptions, OccupiedOptions,
+    dump_json, dump_view, find_symbol, occupied_json, DumpOptions, OccupiedOptions,
 };
 use pcbcraft_domain::geometry::{parse_window, GeometryError, Point};
 use pcbcraft_kicad::geometry::{load_cached, read_clearance_rules};
@@ -19,6 +19,8 @@ pub enum GeometryKind {
     Dump(DumpArgs),
     /// Whether a point is inside a blocking area, and how far the free space reaches.
     IsOccupied(OccupiedArgs),
+    /// Shapes of one footprint placed on the board.
+    FindSymbol(FindSymbolArgs),
 }
 
 #[derive(Args)]
@@ -65,6 +67,16 @@ pub struct OccupiedArgs {
     input: Option<PathBuf>,
 }
 
+#[derive(Args)]
+pub struct FindSymbolArgs {
+    /// Footprint reference, for example U1.
+    reference: String,
+    #[arg(long)]
+    board: Option<PathBuf>,
+    /// A .kicad_pro, .kicad_sch, or .kicad_pcb file.
+    input: Option<PathBuf>,
+}
+
 pub fn run(kind: GeometryKind) -> Result<()> {
     let value = match kind {
         GeometryKind::Dump(args) => {
@@ -94,6 +106,10 @@ pub fn run(kind: GeometryKind) -> Result<()> {
                 },
             )
             .map_err(anyhow_geometry)?
+        }
+        GeometryKind::FindSymbol(args) => {
+            let board = load(&args.input, args.board.as_deref())?;
+            find_symbol(&board, &args.reference).map_err(anyhow_geometry)?
         }
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
@@ -187,6 +203,13 @@ fn looks_like_project(text: &str) -> bool {
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| matches!(ext, "kicad_pcb" | "kicad_pro" | "kicad_sch"))
         || path.exists()
+}
+
+pub fn load_geometry(
+    input: Option<&Path>,
+    board: Option<&Path>,
+) -> Result<pcbcraft_domain::geometry::BoardGeometry> {
+    load(&input.map(Path::to_path_buf), board)
 }
 
 fn load(

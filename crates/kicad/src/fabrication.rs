@@ -20,6 +20,41 @@ impl KiCad {
             cli: KiCadCli::from_env(),
         }
     }
+
+    /// Orthographic top view of the 3D board. `frame` aims the camera at one square.
+    pub fn render_top(
+        &self,
+        board: &Path,
+        output: &Path,
+        pixels: u32,
+        side: &str,
+        frame: Option<pcbcraft_domain::geometry::RenderFrame>,
+    ) -> Result<()> {
+        let mut args = vec![
+            "pcb".into(),
+            "render".into(),
+            "--side".into(),
+            side.into(),
+            "--quality".into(),
+            "basic".into(),
+            "--background".into(),
+            "transparent".into(),
+            "--width".into(),
+            pixels.to_string(),
+            "--height".into(),
+            pixels.to_string(),
+            "--output".into(),
+            output.display().to_string(),
+        ];
+        if let Some(frame) = frame {
+            args.push("--pivot".into());
+            args.push(format!("{},{},0", frame.pivot_x_cm, frame.pivot_y_cm));
+            args.push("--zoom".into());
+            args.push(frame.zoom.to_string());
+        }
+        args.push(board.display().to_string());
+        self.cli.run_to_file(&args)
+    }
 }
 
 impl NetGraphSource for KiCad {

@@ -22,12 +22,23 @@ pub fn parse_board(text: &str) -> Result<BoardGeometry> {
     }
     let (copper, mask) = layers_of(&expr);
     let nets = net_table(&expr);
+    let mask_expansion = board_mask_expansion(&expr);
     let mut shapes = Vec::new();
+    let mut footprints = Vec::new();
     let mut edge_lines: Vec<(Point, Point)> = Vec::new();
     for item in children(&expr).iter().skip(1) {
         match head(item) {
             Some("footprint") => {
-                footprint(item, &copper, &mask, &nets, &mut shapes, &mut edge_lines)?;
+                footprint(
+                    item,
+                    &copper,
+                    &mask,
+                    &nets,
+                    mask_expansion,
+                    &mut shapes,
+                    &mut footprints,
+                    &mut edge_lines,
+                )?;
             }
             Some("segment") => shapes.extend(track_segment(item, &nets)?),
             Some("arc") => shapes.extend(track_arc(item, &nets)?),
@@ -47,9 +58,13 @@ pub fn parse_board(text: &str) -> Result<BoardGeometry> {
         }
     }
     shapes.extend(chain_edge(edge_lines));
+    let (outer_copper_mm, inner_copper_mm) = copper_thickness(&expr);
     Ok(BoardGeometry {
         copper_layers: copper,
         shapes,
+        outer_copper_mm,
+        inner_copper_mm,
+        footprints,
     })
 }
 
@@ -131,7 +146,9 @@ impl Place {
         if self.mirror {
             point.x = -point.x;
         }
-        let rotated = rotate_point(point, Point::new(0.0, 0.0), self.rot);
+        // KiCad angles are counterclockwise with Y increasing downward.
+        // rotate_point is counterclockwise with Y increasing upward, so the sign flips.
+        let rotated = rotate_point(point, Point::new(0.0, 0.0), -self.rot);
         Point::new(rotated.x + self.at.x, rotated.y + self.at.y)
     }
 
@@ -166,27 +183,38 @@ fn footprint(
     copper: &[String],
     mask: &[String],
     nets: &HashMap<String, String>,
+    mask_expansion: f64,
     shapes: &mut Vec<Shape>,
+    footprints: &mut Vec<pcbcraft_domain::geometry::FootprintName>,
     edge_lines: &mut Vec<(Point, Point)>,
 ) -> Result<()> {
-    let layer = child_atom(expr, "layer").unwrap_or("F.Cu");
-    let mirror = layer.starts_with('B');
+    // A footprint saved on the board already has its flip baked into pad coordinates.
+    // Mirroring again would throw every back-side part across its origin.
+    let _layer = child_atom(expr, "layer").unwrap_or("F.Cu");
+    let mirror = false;
     let (at, rot) = at_pair(child(expr, "at")).unwrap_or((Point::new(0.0, 0.0), 0.0));
     let place = Place { at, rot, mirror };
     let reference = property(expr, "Reference");
+    if let (Some(reference), Some(name)) = (reference.clone(), atom_at(expr, 1)) {
+        footprints.push(pcbcraft_domain::geometry::FootprintName {
+            reference,
+            name: name.to_string(),
+        });
+    }
     for item in children(expr).iter().skip(1) {
         match head(item) {
-            Some("pad") => shapes.extend(pad_shapes(item, &place, copper, mask, &reference)?),
+            Some("pad") => shapes.extend(pad_shapes(
+                item,
+                &place,
+                copper,
+                mask,
+                &reference,
+                mask_expansion,
+            )?),
+            Some("property") => silk_property(item, place, &reference, shapes),
             Some("zone") => shapes.extend(zone_shapes(item, nets)?),
             Some(name) if name.starts_with("fp_") => {
-                graphic(
-                    item,
-                    place,
-                    shapes,
-                    edge_lines,
-                    reference.as_deref(),
-                    false,
-                )?;
+                graphic(item, place, shapes, edge_lines, reference.as_deref(), false)?;
             }
             _ => {}
         }
@@ -200,8 +228,10 @@ fn pad_shapes(
     copper: &[String],
     _mask: &[String],
     reference: &Option<String>,
+    board_mask_expansion: f64,
 ) -> Result<Vec<Shape>> {
     let number = atom_at(expr, 1).unwrap_or("").to_string();
+    let form = pad_form(atom_at(expr, 2).unwrap_or(""));
     let kind = atom_at(expr, 3).unwrap_or("");
     let (pad_at, pad_rot) = at_pair(child(expr, "at")).unwrap_or((Point::new(0.0, 0.0), 0.0));
     let (width, height) = size_of(expr).unwrap_or((0.0, 0.0));
@@ -209,10 +239,11 @@ fn pad_shapes(
     let mut shapes = Vec::new();
     let net = net_of(expr, &HashMap::new());
     let layers = listed_copper(&layer_tokens(expr), copper);
+    let expansion = child_number(expr, "solder_mask_margin").unwrap_or(board_mask_expansion);
     for local in locals {
-        let placed = place_pad(local, pad_at, pad_rot, place);
+        let placed = place_pad(local, pad_at, -pad_rot, place);
         for layer in &layers {
-            shapes.push(make_shape(
+            let mut shape = make_shape(
                 Source::Pad,
                 layer.clone(),
                 reference.clone(),
@@ -223,25 +254,52 @@ fn pad_shapes(
                 ClearanceClass::Copper { net: net.clone() },
                 false,
                 placed.clone(),
-            ));
+            );
+            shape.pad_form = form;
+            shape.mask_expansion_mm = expansion;
+            shapes.push(shape);
         }
     }
-    if let Some(drill) = drill_outline(expr) {
-        let placed = place_pad(drill, pad_at, pad_rot, place);
-        shapes.push(make_shape(
+    if let Some((drill, length)) = drill_size(expr) {
+        let placed = place_pad(drill_outline(expr).expect("drill"), pad_at, -pad_rot, place);
+        let mut shape = make_shape(
             Source::Hole,
             "drill".to_string(),
             reference.clone(),
             Some(number),
             net_of(expr, &HashMap::new()),
-            None,
+            Some(drill),
             true,
             ClearanceClass::Hole,
             false,
             placed,
-        ));
+        );
+        shape.pad_form = form;
+        shape.drill_length_mm = Some(length);
+        shapes.push(shape);
     }
     Ok(shapes)
+}
+
+fn pad_form(kind: &str) -> Option<pcbcraft_domain::geometry::PadForm> {
+    use pcbcraft_domain::geometry::PadForm;
+    Some(match kind {
+        "smd" | "connect" => PadForm::Smd,
+        "thru_hole" => PadForm::Through,
+        "np_thru_hole" => PadForm::NonPlated,
+        _ => return None,
+    })
+}
+
+fn drill_size(expr: &SExpr) -> Option<(f64, f64)> {
+    let drill = child(expr, "drill")?;
+    if atom_at(drill, 1) == Some("oval") {
+        let width = atom_at(drill, 2)?.parse::<f64>().ok()?;
+        let height = atom_at(drill, 3)?.parse::<f64>().ok()?;
+        return Some((width.min(height), width.max(height)));
+    }
+    let diameter = atom_at(drill, 1)?.parse::<f64>().ok()?;
+    Some((diameter, diameter))
 }
 
 fn pad_outlines(
@@ -278,11 +336,22 @@ fn pad_outlines(
             )])
         }
         "custom" => {
-            let primitives = custom_primitives(expr)?;
-            if primitives.is_empty() {
+            let anchor = child(expr, "options")
+                .and_then(|options| child(options, "anchor"))
+                .and_then(|anchor| atom_at(anchor, 1))
+                .unwrap_or("rect");
+            let mut outlines = vec![match anchor {
+                "circle" => Outline::Circle {
+                    center: Point::new(0.0, 0.0),
+                    radius: width.max(height) / 2.0,
+                },
+                _ => rectangle(Point::new(0.0, 0.0), width, height),
+            }];
+            outlines.extend(custom_primitives(expr)?);
+            if outlines.is_empty() {
                 bail!("{who} has a custom shape without primitives");
             }
-            Ok(primitives)
+            Ok(outlines)
         }
         other => bail!("unknown pad shape '{other}' on {who}"),
     }
@@ -373,7 +442,7 @@ fn via_shapes(
         ));
     }
     if drill > 0.0 {
-        shapes.push(make_shape(
+        let mut hole = make_shape(
             Source::Hole,
             "drill".to_string(),
             None,
@@ -387,7 +456,9 @@ fn via_shapes(
                 center: at,
                 radius: drill / 2.0,
             },
-        ));
+        );
+        hole.drill_length_mm = Some(drill);
+        shapes.push(hole);
     }
     Ok(shapes)
 }
@@ -883,11 +954,86 @@ fn make_shape(
         blocks,
         clearance_class,
         clearance_mm: 0.0,
+        mask_expansion_mm: 0.0,
+        drill_length_mm: None,
+        pad_form: None,
+        text_height_mm: None,
         inset,
         inward: false,
         clearance: occupied.clone(),
         occupied,
     }
+}
+
+fn board_mask_expansion(expr: &SExpr) -> f64 {
+    setup_number(expr, "pad_to_mask_clearance").unwrap_or(0.0)
+}
+
+fn copper_thickness(expr: &SExpr) -> (Option<f64>, Option<f64>) {
+    let outer = layer_thickness(expr, "F.Cu").or_else(|| layer_thickness(expr, "B.Cu"));
+    let inner = layer_thickness(expr, "In1.Cu").or_else(|| layer_thickness(expr, "In2.Cu"));
+    (outer, inner)
+}
+
+fn layer_thickness(expr: &SExpr, name: &str) -> Option<f64> {
+    fn walk(expr: &SExpr, name: &str) -> Option<f64> {
+        if head(expr) == Some("layer") && atom_at(expr, 1) == Some(name) {
+            return child_number(expr, "thickness");
+        }
+        for item in children(expr).iter().skip(1) {
+            if let Some(found) = walk(item, name) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(expr, name)
+}
+
+fn setup_number(expr: &SExpr, name: &str) -> Option<f64> {
+    fn walk(expr: &SExpr, name: &str) -> Option<f64> {
+        if head(expr) == Some(name) {
+            return atom_at(expr, 1)?.parse().ok();
+        }
+        for item in children(expr).iter().skip(1) {
+            if let Some(found) = walk(item, name) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(expr, name)
+}
+
+fn silk_property(expr: &SExpr, place: Place, reference: &Option<String>, shapes: &mut Vec<Shape>) {
+    let layer = child_atom(expr, "layer").unwrap_or("");
+    if !layer.ends_with("SilkS") {
+        return;
+    }
+    let at = xy_child(expr, "at").unwrap_or(Point::new(0.0, 0.0));
+    let at = place.map_point(at);
+    let text = atom_at(expr, 2).unwrap_or("");
+    let (sx, sy) = font_size(expr);
+    let mut shape = make_shape(
+        Source::Graphic,
+        layer.to_string(),
+        reference.clone(),
+        None,
+        None,
+        font_thickness(expr),
+        false,
+        ClearanceClass::None,
+        false,
+        text_box(at, text, sx, sy),
+    );
+    shape.text_height_mm = Some(sy.max(sx));
+    shapes.push(shape);
+}
+
+fn font_thickness(expr: &SExpr) -> Option<f64> {
+    let effects = child(expr, "effects")?;
+    let font = child(effects, "font")?;
+    child_number(font, "thickness").or_else(|| atom_at(child(font, "thickness")?, 1)?.parse().ok())
 }
 
 fn layers_of(expr: &SExpr) -> (Vec<String>, Vec<String>) {
@@ -1188,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    fn back_pad_is_mirrored_and_silk_does_not_block() {
+    fn back_pad_keeps_the_saved_x_and_silk_does_not_block() {
         let board = loaded();
         let pad = board
             .shapes
@@ -1198,7 +1344,8 @@ mod tests {
         let Outline::Circle { center, .. } = &pad.occupied else {
             panic!("circle");
         };
-        assert!((center.x + 1.0).abs() < 1e-6);
+        // The board file already stores a flipped footprint's pad coordinates.
+        assert!((center.x - 1.0).abs() < 1e-6);
         assert!(board.shapes.iter().any(|shape| {
             shape.layer == "F.SilkS" && !shape.blocks && shape.source == Source::Graphic
         }));

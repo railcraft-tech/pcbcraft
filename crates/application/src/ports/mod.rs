@@ -1,3 +1,4 @@
+mod board;
 mod component_store;
 mod drawing_renderer;
 mod fabrication;
@@ -7,6 +8,7 @@ mod rotation_db;
 mod supply;
 mod test_printer;
 
+pub use board::BoardSource;
 pub use component_store::{ComponentStore, Usage};
 pub use drawing_renderer::DrawingRenderer;
 pub use fabrication::Fabrication;

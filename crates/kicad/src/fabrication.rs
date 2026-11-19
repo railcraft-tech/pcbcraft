@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use pcbcraft_application::ports::{Fabrication, NetGraphSource};
+use anyhow::{Context, Result};
+use pcbcraft_application::ports::{BoardSource, Fabrication, NetGraphSource};
 use pcbcraft_domain::drawing::Side;
 use pcbcraft_domain::net::NetGraph;
 use pcbcraft_domain::validate::{Design, Violation};
@@ -54,6 +54,16 @@ impl KiCad {
         }
         args.push(board.display().to_string());
         self.cli.run_to_file(&args)
+    }
+}
+
+impl BoardSource for KiCad {
+    fn load(&self, project: &Path) -> Result<pcbcraft_domain::geometry::BoardGeometry> {
+        let resolved = crate::project::resolve(Some(project), None, None)?;
+        let board = resolved.board.context("the project has no board")?;
+        let text =
+            std::fs::read_to_string(&board).with_context(|| format!("read {}", board.display()))?;
+        crate::geometry::parse_board(&text)
     }
 }
 

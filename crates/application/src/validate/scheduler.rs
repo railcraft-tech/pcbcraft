@@ -7,8 +7,8 @@ use jsonschema::{Draft, Validator as JsonValidator};
 use serde_json::Value;
 
 use crate::ports::{
-    Fabrication, NetGraphSource, PartCards, PartStock, SuiteHeader, TestLine, TestPrinter,
-    TestStatus, UsedParts,
+    BoardSource, Fabrication, NetGraphSource, PartCards, PartStock, SuiteHeader, TestLine,
+    TestPrinter, TestStatus, UsedParts,
 };
 
 pub struct TestContext<'a> {
@@ -17,6 +17,7 @@ pub struct TestContext<'a> {
     pub stock: &'a dyn PartStock,
     pub graph: &'a dyn NetGraphSource,
     pub cards: &'a dyn PartCards,
+    pub boards: &'a dyn BoardSource,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +88,7 @@ pub fn known_types() -> &'static [&'static str] {
 const KNOWN_TYPES: &[&str] = &[
     "ERCValidator",
     "DRCValidator",
+    "JLCPCBDFM",
     "Attributes",
     "PartAvailability",
     "CatalogValue",
@@ -213,8 +215,10 @@ fn record(
         totals.skipped += 1;
     } else {
         totals.assertions += item.assertions;
-        if item.failed {
-            totals.failed += 1;
+        match item.line.status {
+            TestStatus::Failed => totals.failed += 1,
+            TestStatus::Warning => totals.warnings += 1,
+            TestStatus::Passed | TestStatus::Skipped => {}
         }
     }
     printer.test_line(&item.line);
@@ -241,29 +245,25 @@ fn failed_line(name: &str, subtest: bool, detail: String) -> super::validator::L
     super::validator::Line {
         name: name.to_string(),
         subtest,
-        passed: false,
+        status: TestStatus::Failed,
         details: vec![detail],
         assertions: 1,
     }
 }
 
 fn finished_line(group: &str, line: super::validator::Line) -> FinishedTest {
-    let passed = line.passed;
+    let failed = line.status == TestStatus::Failed;
     FinishedTest {
         line: TestLine {
             group: group.to_string(),
             name: line.name,
             subtest: line.subtest,
-            status: if passed {
-                TestStatus::Passed
-            } else {
-                TestStatus::Failed
-            },
+            status: line.status,
             duration: Duration::ZERO,
             details: line.details,
         },
         assertions: line.assertions,
-        failed: !passed,
+        failed,
     }
 }
 
@@ -287,6 +287,7 @@ pub struct RunTotals {
     pub blocked: bool,
     pub tests: usize,
     pub failed: usize,
+    pub warnings: usize,
     pub assertions: usize,
     pub skipped: usize,
     pub unmatched_skips: Vec<String>,
@@ -299,6 +300,7 @@ impl Default for RunTotals {
             blocked: false,
             tests: 0,
             failed: 0,
+            warnings: 0,
             assertions: 0,
             skipped: 0,
             unmatched_skips: Vec::new(),
@@ -317,6 +319,20 @@ mod tests {
     use std::cell::RefCell;
     use std::path::Path;
     use std::rc::Rc;
+
+    struct NoBoard;
+    impl crate::ports::BoardSource for NoBoard {
+        fn load(&self, _: &Path) -> Result<pcbcraft_domain::geometry::BoardGeometry> {
+            Ok(pcbcraft_domain::geometry::BoardGeometry {
+                copper_layers: Vec::new(),
+                shapes: Vec::new(),
+                outer_copper_mm: None,
+                inner_copper_mm: None,
+                footprints: Vec::new(),
+            })
+        }
+    }
+    const NO_BOARD: NoBoard = NoBoard;
 
     struct NoParts;
     impl UsedParts for NoParts {
@@ -344,6 +360,7 @@ mod tests {
             stock: &STOCK,
             graph,
             cards,
+            boards: &NO_BOARD,
         }
     }
 
@@ -421,7 +438,17 @@ mod tests {
         }
         fn test_line(&mut self, _: &TestLine) {}
         fn separator(&mut self) {}
-        fn summary(&mut self, _: Duration, _: &str, _: bool, _: usize, _: usize, _: usize) {}
+        fn summary(
+            &mut self,
+            _: Duration,
+            _: &str,
+            _: bool,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+        ) {
+        }
     }
 
     #[test]
@@ -503,7 +530,17 @@ mod tests {
             self.log.borrow_mut().push(format!("{kind} {}", line.name));
         }
         fn separator(&mut self) {}
-        fn summary(&mut self, _: Duration, _: &str, _: bool, _: usize, _: usize, _: usize) {}
+        fn summary(
+            &mut self,
+            _: Duration,
+            _: &str,
+            _: bool,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+        ) {
+        }
     }
 
     struct Listing {
@@ -549,6 +586,7 @@ mod tests {
             stock: &stock,
             graph: &EmptyGraph,
             cards: &EmptyCards,
+            boards: &NO_BOARD,
         };
         let tests = vec![
             LoadedTest {
@@ -618,7 +656,17 @@ mod tests {
             }
         }
         fn separator(&mut self) {}
-        fn summary(&mut self, _: Duration, _: &str, _: bool, _: usize, _: usize, _: usize) {}
+        fn summary(
+            &mut self,
+            _: Duration,
+            _: &str,
+            _: bool,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+        ) {
+        }
     }
 
     #[test]
@@ -632,6 +680,7 @@ mod tests {
             stock: &stock,
             graph: &EmptyGraph,
             cards: &EmptyCards,
+            boards: &NO_BOARD,
         };
         let tests = vec![LoadedTest {
             name: "availability-test".into(),

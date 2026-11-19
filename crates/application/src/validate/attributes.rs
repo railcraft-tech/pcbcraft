@@ -43,7 +43,11 @@ fn lines(file_name: &str, components: &[Component]) -> Vec<Line> {
         found.push(Line {
             name: component.reference.clone(),
             subtest: true,
-            passed: problems.is_empty(),
+            status: if problems.is_empty() {
+                crate::ports::TestStatus::Passed
+            } else {
+                crate::ports::TestStatus::Failed
+            },
             details: problems,
             assertions: 1,
         });
@@ -52,7 +56,7 @@ fn lines(file_name: &str, components: &[Component]) -> Vec<Line> {
         return vec![Line {
             name: file_name.to_string(),
             subtest: false,
-            passed: true,
+            status: crate::ports::TestStatus::Passed,
             details: vec!["no mounting holes or fiducials".into()],
             assertions: 1,
         }];
@@ -129,9 +133,9 @@ mod tests {
             ],
         );
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].passed);
+        assert_eq!(lines[0].status, crate::ports::TestStatus::Passed);
         assert_eq!(lines[0].name, "H1");
-        assert!(!lines[1].passed);
+        assert_eq!(lines[1].status, crate::ports::TestStatus::Failed);
         assert!(lines[1].details.iter().any(|item| item == "in BOM"));
         assert!(lines[1]
             .details
@@ -145,7 +149,7 @@ mod tests {
         let mut mark = hole("FID1", "Fiducial:Fiducial_1mm_Mask2mm");
         mark.pcbway = Some("PW1".into());
         let lines = lines("attr", &[mark]);
-        assert!(!lines[0].passed);
+        assert_eq!(lines[0].status, crate::ports::TestStatus::Failed);
         assert!(lines[0].details.iter().any(|item| item == "PCBWay PW1"));
     }
 
@@ -153,7 +157,7 @@ mod tests {
     fn no_marks_is_one_passing_line() {
         let lines = lines("attr", &[hole("R1", "Resistor_SMD:R_0805")]);
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].passed);
+        assert_eq!(lines[0].status, crate::ports::TestStatus::Passed);
         assert!(!lines[0].subtest);
         assert!(lines[0].details[0].contains("no mounting holes"));
     }

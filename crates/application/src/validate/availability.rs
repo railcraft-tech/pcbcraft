@@ -138,7 +138,11 @@ impl ValidatorInterface for PartAvailability {
                         Ok(Line {
                             name,
                             subtest: !single_plain,
-                            passed: case.passed,
+                            status: if case.passed {
+                                crate::ports::TestStatus::Passed
+                            } else {
+                                crate::ports::TestStatus::Failed
+                            },
                             details: case.details,
                             assertions: 1,
                         })

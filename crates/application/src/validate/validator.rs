@@ -3,13 +3,15 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 
+use crate::ports::TestStatus;
+
 use super::scheduler::TestContext;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     pub name: String,
     pub subtest: bool,
-    pub passed: bool,
+    pub status: TestStatus,
     pub details: Vec<String>,
     pub assertions: usize,
 }
@@ -75,9 +77,11 @@ pub fn validators() -> &'static [&'static dyn ValidatorInterface] {
         VoltageRating,
     };
     use super::erc::ErcValidator;
+    use super::jlcpcb_dfm::JLCPCBDFM;
     static ALL: &[&dyn ValidatorInterface] = &[
         &ErcValidator,
         &DrcValidator,
+        &JLCPCBDFM,
         &Attributes,
         &PartAvailability,
         &CatalogValue,

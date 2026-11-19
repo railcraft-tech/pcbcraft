@@ -66,7 +66,11 @@ pub(crate) fn report_line(file_name: &str, report: &Report) -> Line {
     Line {
         name: file_name.to_string(),
         subtest: false,
-        passed: !report.has_error(),
+        status: if report.has_error() {
+            crate::ports::TestStatus::Failed
+        } else {
+            crate::ports::TestStatus::Passed
+        },
         details,
         assertions: 1 + report.violations.len(),
     }

@@ -1,5 +1,9 @@
 //! Board outlines in pcbnew coordinates: millimetres, Y up.
 
+mod separation;
+
+pub use separation::{boundary_gap, boundary_segments, filled_separation, Separation};
+
 use thiserror::Error;
 
 const EPS: f64 = 1e-9;
@@ -48,6 +52,13 @@ pub struct PathOutline {
 pub enum Outline {
     Path(PathOutline),
     Circle { center: Point, radius: f64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PadForm {
+    Smd,
+    Through,
+    NonPlated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +128,13 @@ pub struct Shape {
     pub blocks: bool,
     pub clearance_class: ClearanceClass,
     pub clearance_mm: f64,
+    /// Solder-mask opening growth beyond the copper pad. Zero keeps the opening 1:1.
+    pub mask_expansion_mm: f64,
+    /// Longer axis of an oval drill. A round hole leaves this empty.
+    pub drill_length_mm: Option<f64>,
+    pub pad_form: Option<PadForm>,
+    /// Silk text height. Stroke graphics leave this empty.
+    pub text_height_mm: Option<f64>,
     /// Closed board outline: clearance is inset and blocks outside that inset.
     pub inset: bool,
     /// Filled by [`apply_clearance`] when `inset` is set.
@@ -126,9 +144,18 @@ pub struct Shape {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct FootprintName {
+    pub reference: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct BoardGeometry {
     pub copper_layers: Vec<String>,
     pub shapes: Vec<Shape>,
+    pub outer_copper_mm: Option<f64>,
+    pub inner_copper_mm: Option<f64>,
+    pub footprints: Vec<FootprintName>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -255,6 +282,16 @@ pub fn parse_window(text: &str) -> Result<Window, GeometryError> {
         y_min: y0.min(y1),
         y_max: y0.max(y1),
     })
+}
+
+pub fn outline_window(outline: &Outline) -> Window {
+    let bounds = outline_bounds(outline);
+    Window {
+        x_min: bounds.min_x,
+        x_max: bounds.max_x,
+        y_min: bounds.min_y,
+        y_max: bounds.max_y,
+    }
 }
 
 pub fn shape_meets_window(shape: &Shape, window: Window) -> bool {
@@ -1459,6 +1496,10 @@ mod tests {
             blocks: true,
             clearance_class: ClearanceClass::None,
             clearance_mm: 0.0,
+            mask_expansion_mm: 0.0,
+            drill_length_mm: None,
+            pad_form: None,
+            text_height_mm: None,
             inset: false,
             inward: false,
             occupied: Outline::Circle {
@@ -1499,6 +1540,9 @@ mod tests {
     fn track_clearance_is_the_stadium_plus_the_gap() {
         let mut board = BoardGeometry {
             copper_layers: vec!["F.Cu".into()],
+            outer_copper_mm: None,
+            inner_copper_mm: None,
+            footprints: Vec::new(),
             shapes: vec![Shape {
                 source: Source::Track,
                 layer: "F.Cu".into(),
@@ -1511,6 +1555,10 @@ mod tests {
                     net: Some("GND".into()),
                 },
                 clearance_mm: 0.0,
+                mask_expansion_mm: 0.0,
+                drill_length_mm: None,
+                pad_form: None,
+                text_height_mm: None,
                 inset: false,
                 inward: false,
                 occupied: stadium(Point::new(0.0, 0.0), Point::new(10.0, 0.0), 0.25),
@@ -1530,6 +1578,9 @@ mod tests {
     fn clearance_bounds_pull_a_shape_into_the_window() {
         let mut board = BoardGeometry {
             copper_layers: vec!["F.Cu".into()],
+            outer_copper_mm: None,
+            inner_copper_mm: None,
+            footprints: Vec::new(),
             shapes: vec![Shape {
                 source: Source::Zone,
                 layer: "F.Cu".into(),
@@ -1542,6 +1593,10 @@ mod tests {
                     net: Some("GND".into()),
                 },
                 clearance_mm: 0.0,
+                mask_expansion_mm: 0.0,
+                drill_length_mm: None,
+                pad_form: None,
+                text_height_mm: None,
                 inset: false,
                 inward: false,
                 occupied: polygon(&[

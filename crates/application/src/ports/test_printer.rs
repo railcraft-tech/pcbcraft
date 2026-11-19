@@ -4,6 +4,7 @@ use std::time::Duration;
 pub enum TestStatus {
     Passed,
     Failed,
+    Warning,
     Skipped,
 }
 
@@ -37,5 +38,6 @@ pub trait TestPrinter {
         tests: usize,
         assertions: usize,
         skipped: usize,
+        warnings: usize,
     );
 }

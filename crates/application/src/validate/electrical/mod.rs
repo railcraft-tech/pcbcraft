@@ -885,7 +885,11 @@ fn plain(name: &str, passed: bool, detail: &str) -> Line {
     Line {
         name: name.to_string(),
         subtest: false,
-        passed,
+        status: if passed {
+            crate::ports::TestStatus::Passed
+        } else {
+            crate::ports::TestStatus::Failed
+        },
         details: if detail.is_empty() {
             Vec::new()
         } else {
@@ -899,7 +903,11 @@ fn sub(name: &str, passed: bool, detail: &str) -> Line {
     Line {
         name: name.to_string(),
         subtest: true,
-        passed,
+        status: if passed {
+            crate::ports::TestStatus::Passed
+        } else {
+            crate::ports::TestStatus::Failed
+        },
         details: if detail.is_empty() {
             Vec::new()
         } else {
@@ -1007,6 +1015,20 @@ mod tests {
     use pcbcraft_domain::parts::{ElecParam, PartRecord, Supplier};
     use pcbcraft_domain::validate::{Design, Violation};
 
+    struct NoBoard;
+    impl crate::ports::BoardSource for NoBoard {
+        fn load(&self, _: &std::path::Path) -> Result<pcbcraft_domain::geometry::BoardGeometry> {
+            Ok(pcbcraft_domain::geometry::BoardGeometry {
+                copper_layers: Vec::new(),
+                shapes: Vec::new(),
+                outer_copper_mm: None,
+                inner_copper_mm: None,
+                footprints: Vec::new(),
+            })
+        }
+    }
+    const NO_BOARD: NoBoard = NoBoard;
+
     fn run(
         type_name: &str,
         file_name: &str,
@@ -1024,6 +1046,7 @@ mod tests {
             stock: &stock,
             graph,
             cards,
+            boards: &NO_BOARD,
         };
         validator
             .run(file_name, spec, &ctx)?
@@ -1196,7 +1219,7 @@ mod tests {
             &FixedCards(vec![card("C10", "10k", "1%", "0.1W", "50V")]),
         )
         .unwrap();
-        assert!(!lines[0].passed);
+        assert_eq!(lines[0].status, crate::ports::TestStatus::Failed);
         assert!(lines[0].details[0].contains("4.7kohm"));
     }
 
@@ -1236,7 +1259,12 @@ mod tests {
             }]),
         )
         .unwrap();
-        assert!(lines[0].passed, "{:?}", lines[0]);
+        assert_eq!(
+            lines[0].status,
+            crate::ports::TestStatus::Passed,
+            "{:?}",
+            lines[0]
+        );
     }
 
     #[test]
@@ -1270,7 +1298,12 @@ mod tests {
             &FixedCards(vec![card("C10", "22ohm", "1%", "0.1W", "")]),
         )
         .unwrap();
-        assert!(lines[0].passed, "{:?}", lines[0]);
+        assert_eq!(
+            lines[0].status,
+            crate::ports::TestStatus::Passed,
+            "{:?}",
+            lines[0]
+        );
     }
 
     #[test]
@@ -1291,7 +1324,7 @@ mod tests {
             &FixedCards(vec![card("C10", "10k", "1%", "0.001W", "")]),
         )
         .unwrap();
-        assert!(!lines[0].passed);
+        assert_eq!(lines[0].status, crate::ports::TestStatus::Failed);
         assert!(lines[0].name.starts_with("R1 "));
     }
 
@@ -1330,7 +1363,12 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert!(lines[0].passed, "{:?}", lines[0]);
+        assert_eq!(
+            lines[0].status,
+            crate::ports::TestStatus::Passed,
+            "{:?}",
+            lines[0]
+        );
         assert!(lines[0].name.contains("1.6"));
         assert!(lines[0].subtest);
     }
@@ -1386,7 +1424,12 @@ mod tests {
             &FixedCards(vec![cap_card("C100", "100nF", "6.3V")]),
         )
         .unwrap();
-        assert!(!lines[0].passed, "{:?}", lines[0]);
+        assert_eq!(
+            lines[0].status,
+            crate::ports::TestStatus::Failed,
+            "{:?}",
+            lines[0]
+        );
         assert!(lines[0].details[0].contains("6.3V"));
     }
 
@@ -1418,7 +1461,12 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert!(lines[0].passed, "{:?}", lines[0]);
+        assert_eq!(
+            lines[0].status,
+            crate::ports::TestStatus::Passed,
+            "{:?}",
+            lines[0]
+        );
         assert!(lines[0].name.contains("5kohm"), "{}", lines[0].name);
     }
 
@@ -1443,7 +1491,12 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert!(lines[0].passed, "{:?}", lines[0]);
+        assert_eq!(
+            lines[0].status,
+            crate::ports::TestStatus::Passed,
+            "{:?}",
+            lines[0]
+        );
         assert!(lines[0].name.contains("20kohm"), "{}", lines[0].name);
     }
 
@@ -1478,7 +1531,12 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert!(lines[0].passed, "{:?}", lines[0]);
+        assert_eq!(
+            lines[0].status,
+            crate::ports::TestStatus::Passed,
+            "{:?}",
+            lines[0]
+        );
         assert!(lines[0].name.contains("1ms"), "{}", lines[0].name);
     }
 
@@ -1529,7 +1587,7 @@ mod tests {
             &FixedCards(vec![]),
         )
         .unwrap();
-        assert!(!lines[0].passed);
+        assert_eq!(lines[0].status, crate::ports::TestStatus::Failed);
         assert!(!lines[0].subtest);
         assert!(lines[0].details[0].contains("no rails"));
     }

@@ -638,6 +638,7 @@ fn run_test(directory: &Path, name: Option<&str>) -> Result<i32> {
         stock: &stock,
         graph: &kicad,
         cards: &cards,
+        boards: &kicad,
     };
     let skipped = match load_skips() {
         Ok(skipped) => skipped,
@@ -657,6 +658,7 @@ fn run_test(directory: &Path, name: Option<&str>) -> Result<i32> {
         totals.tests,
         totals.assertions,
         totals.skipped,
+        totals.warnings,
     );
     for entry in totals.unmatched_skips {
         eprintln!("skipped entry '{entry}' did not match a test");

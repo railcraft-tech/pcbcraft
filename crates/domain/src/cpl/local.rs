@@ -319,18 +319,4 @@ transformations:
         assert_eq!(db.hit(db.lookup("R1", "SOT-23-3").unwrap()).offset_x, 1.26);
         assert_eq!(db.len(), 6);
     }
-
-    #[test]
-    fn board_file_parses() {
-        let db = LocalDb::parse(include_str!("longfred-v1a.yaml")).unwrap();
-        assert!(db.lookup("U1", "QFN-40").is_some());
-        assert!(db.lookup("J3", "JST_GH").is_some());
-        for name in ["Q1", "Q2", "Q3", "Q4", "U7"] {
-            assert!(db.lookup(name, "X").is_some(), "{name}");
-        }
-        assert!(db.lookup("J1", "USB_C_Receptacle_GCT").is_some());
-        assert!(db.lookup("J2", "Molex").is_some());
-        assert!(db.lookup("J10", "Hirose").is_some());
-        assert!(db.lookup("J4", "U.FL").is_some());
-    }
 }

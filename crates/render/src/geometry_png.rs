@@ -265,6 +265,10 @@ mod tests {
             blocks: source != Source::Graphic,
             clearance_class: ClearanceClass::None,
             clearance_mm: 0.0,
+            mask_expansion_mm: 0.0,
+            drill_length_mm: None,
+            pad_form: None,
+            text_height_mm: None,
             inset: false,
             inward: false,
             occupied: Outline::Path(PathOutline {
@@ -315,6 +319,10 @@ mod tests {
             blocks: true,
             clearance_class: ClearanceClass::None,
             clearance_mm: 0.0,
+            mask_expansion_mm: 0.0,
+            drill_length_mm: None,
+            pad_form: None,
+            text_height_mm: None,
             inset: false,
             inward: false,
             occupied: Outline::Circle {

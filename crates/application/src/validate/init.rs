@@ -15,6 +15,12 @@ pub fn scaffold_body(validator: &str, project: &str) -> Option<String> {
     let spec = match validator {
         "PartAvailability" => json!({ "project": project, "defaultMinimum": 10, "part": {} }),
         "ResistorPower" | "VoltageRating" | "Divider" => json!({ "project": project, "rails": {} }),
+        "JLCPCBDFM" => json!({
+            "project": project,
+            "maskColor": "green",
+            "rails": [],
+            "allowOverhang": []
+        }),
         "ERCValidator" | "DRCValidator" | "Attributes" | "CatalogValue" | "TimeConstant"
         | "ParallelPassives" | "SeriesPassives" => json!({ "project": project }),
         _ => return None,

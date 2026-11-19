@@ -53,6 +53,7 @@ impl<W: Write> TestPrinter for ConsolePrinter<W> {
         let mark = match line.status {
             TestStatus::Passed => self.paint("32", "✓"),
             TestStatus::Failed => self.paint("31", "✗"),
+            TestStatus::Warning => self.paint("33", "!"),
             TestStatus::Skipped => self.paint("33", "s"),
         };
         let (head, tail) = if line.subtest {
@@ -68,9 +69,14 @@ impl<W: Write> TestPrinter for ConsolePrinter<W> {
             self.paint("90", &format!("({:.2}s)", line.duration.as_secs_f64()))
         };
         self.emit(&format!("{mark} {group}{name} {time}"));
-        if line.status == TestStatus::Failed {
+        if line.status == TestStatus::Failed || line.status == TestStatus::Warning {
+            let code = if line.status == TestStatus::Failed {
+                "31"
+            } else {
+                "33"
+            };
             for detail in &line.details {
-                let line = self.paint("31", detail);
+                let line = self.paint(code, detail);
                 self.emit(&format!("  {line}"));
             }
         }
@@ -89,15 +95,26 @@ impl<W: Write> TestPrinter for ConsolePrinter<W> {
         tests: usize,
         assertions: usize,
         skipped: usize,
+        warnings: usize,
     ) {
         self.emit(&format!(
             "Time: {} ms, Memory: {memory}",
             elapsed.as_millis()
         ));
-        let footer = if skipped == 0 {
+        let mut extras = Vec::new();
+        if warnings > 0 {
+            extras.push(format!("{warnings} warnings"));
+        }
+        if skipped > 0 {
+            extras.push(format!("{skipped} skipped"));
+        }
+        let footer = if extras.is_empty() {
             format!("({tests} tests, {assertions} assertions)")
         } else {
-            format!("({tests} tests, {assertions} assertions, {skipped} skipped)")
+            format!(
+                "({tests} tests, {assertions} assertions, {})",
+                extras.join(", ")
+            )
         };
         if passed {
             let word = self.paint("32", "OK");
@@ -146,7 +163,7 @@ mod tests {
             duration: Duration::from_millis(290),
             details: Vec::new(),
         });
-        printer.summary(Duration::from_millis(904), "24.00MB", true, 1, 1, 0);
+        printer.summary(Duration::from_millis(904), "24.00MB", true, 1, 1, 0, 0);
         let text = String::from_utf8(buffer).unwrap();
         assert!(text.contains("ERCValidator (1)"));
         assert!(text.contains("✓ ERCValidator: erc-test (0.29s)"));
@@ -166,7 +183,7 @@ mod tests {
             duration: Duration::from_millis(10),
             details: vec!["error: clearance".into()],
         });
-        printer.summary(Duration::from_millis(10), "1.00MB", false, 1, 2, 0);
+        printer.summary(Duration::from_millis(10), "1.00MB", false, 1, 2, 0, 0);
         let text = String::from_utf8(buffer).unwrap();
         assert!(text.contains("✗ DRCValidator: drc-test"));
         assert!(text.contains("error: clearance"));
@@ -185,9 +202,28 @@ mod tests {
             duration: Duration::ZERO,
             details: Vec::new(),
         });
-        printer.summary(Duration::from_millis(1), "1.00MB", true, 1, 0, 1);
+        printer.summary(Duration::from_millis(1), "1.00MB", true, 1, 0, 1, 0);
         let text = String::from_utf8(buffer).unwrap();
         assert!(text.contains("s VoltageRating.C21 (skipped)"));
         assert!(text.contains("OK (1 tests, 0 assertions, 1 skipped)"));
+    }
+
+    #[test]
+    fn a_warning_is_printed_and_the_run_stays_ok() {
+        let mut buffer = Vec::new();
+        let mut printer = ConsolePrinter::new(&mut buffer, false);
+        printer.test_line(&TestLine {
+            group: "JLCPCBDFM".into(),
+            name: "annular-ring".into(),
+            subtest: true,
+            status: TestStatus::Warning,
+            duration: Duration::from_millis(4),
+            details: vec!["0.150 mm is below the recommended 0.200 mm".into()],
+        });
+        printer.summary(Duration::from_millis(4), "1.00MB", true, 1, 1, 0, 1);
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(text.contains("! JLCPCBDFM.annular-ring"));
+        assert!(text.contains("0.150 mm is below the recommended 0.200 mm"));
+        assert!(text.contains("OK (1 tests, 1 assertions, 1 warnings)"));
     }
 }

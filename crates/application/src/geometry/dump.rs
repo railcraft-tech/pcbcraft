@@ -194,6 +194,9 @@ pub fn board_from_dump(value: &Value) -> Result<BoardGeometry, GeometryError> {
     Ok(BoardGeometry {
         copper_layers: Vec::new(),
         shapes,
+        outer_copper_mm: None,
+        inner_copper_mm: None,
+        footprints: Vec::new(),
     })
 }
 
@@ -227,6 +230,10 @@ fn shape_from_dump(layer: &str, value: &Value) -> Result<Shape, GeometryError> {
         blocks,
         clearance_class: pcbcraft_domain::geometry::ClearanceClass::None,
         clearance_mm,
+        mask_expansion_mm: 0.0,
+        drill_length_mm: None,
+        pad_form: None,
+        text_height_mm: None,
         inset: inward,
         inward,
         occupied,
@@ -297,6 +304,9 @@ mod tests {
     fn track_board() -> BoardGeometry {
         let mut board = BoardGeometry {
             copper_layers: vec!["F.Cu".into()],
+            outer_copper_mm: None,
+            inner_copper_mm: None,
+            footprints: Vec::new(),
             shapes: vec![
                 Shape {
                     source: Source::Track,
@@ -310,6 +320,10 @@ mod tests {
                         net: Some("GND".into()),
                     },
                     clearance_mm: 0.0,
+                    mask_expansion_mm: 0.0,
+                    drill_length_mm: None,
+                    pad_form: None,
+                    text_height_mm: None,
                     inset: false,
                     inward: false,
                     occupied: stadium(Point::new(0.0, 0.0), Point::new(10.0, 0.0), 0.25),
@@ -325,6 +339,10 @@ mod tests {
                     blocks: false,
                     clearance_class: ClearanceClass::None,
                     clearance_mm: 0.0,
+                    mask_expansion_mm: 0.0,
+                    drill_length_mm: None,
+                    pad_form: None,
+                    text_height_mm: None,
                     inset: false,
                     inward: false,
                     occupied: stadium(Point::new(0.0, 2.0), Point::new(1.0, 2.0), 0.1),
@@ -463,6 +481,9 @@ mod tests {
     fn find_symbol_keeps_one_footprint_and_ignores_its_clearance_halo() {
         let board = BoardGeometry {
             copper_layers: vec!["F.Cu".into()],
+            outer_copper_mm: None,
+            inner_copper_mm: None,
+            footprints: Vec::new(),
             shapes: vec![
                 Shape {
                     source: Source::Pad,
@@ -474,6 +495,10 @@ mod tests {
                     blocks: true,
                     clearance_class: ClearanceClass::None,
                     clearance_mm: 1.0,
+                    mask_expansion_mm: 0.0,
+                    drill_length_mm: None,
+                    pad_form: None,
+                    text_height_mm: None,
                     inset: false,
                     inward: false,
                     occupied: Outline::Circle {
@@ -495,6 +520,10 @@ mod tests {
                     blocks: true,
                     clearance_class: ClearanceClass::None,
                     clearance_mm: 0.0,
+                    mask_expansion_mm: 0.0,
+                    drill_length_mm: None,
+                    pad_form: None,
+                    text_height_mm: None,
                     inset: false,
                     inward: false,
                     occupied: Outline::Circle {

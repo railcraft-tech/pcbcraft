@@ -90,7 +90,7 @@ fn frame(window: Window) -> Frame {
     let height = ((span_y * scale).ceil() as u32).clamp(1, MAX_SIDE as u32);
     Frame {
         origin_x: window.x_min - MARGIN_MM,
-        origin_y: window.y_max + MARGIN_MM,
+        origin_y: window.y_min - MARGIN_MM,
         scale,
         width,
         height,
@@ -217,7 +217,7 @@ fn vertices(outline: &Outline) -> Vec<Point> {
 
 fn to_px(frame: &Frame, point: Point) -> (f32, f32) {
     let x = (point.x - frame.origin_x) * frame.scale;
-    let y = (frame.origin_y - point.y) * frame.scale;
+    let y = (point.y - frame.origin_y) * frame.scale;
     (x as f32, y as f32)
 }
 

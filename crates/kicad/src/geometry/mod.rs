@@ -1,5 +1,6 @@
 //! Read copper, holes, courtyards, and keepouts from a `.kicad_pcb` file.
 
+mod binary;
 mod cache;
 
 pub use cache::{cache_name, load_cached};
@@ -15,6 +16,9 @@ use serde_json::Value;
 
 use crate::net::{atom_at, children, head, parse_sexp, SExpr};
 
+/// A piece of Edge.Cuts: two ends and, for an arc, a point on it.
+type EdgeSeg = (Point, Point, Option<Point>);
+
 pub fn parse_board(text: &str) -> Result<BoardGeometry> {
     let expr = parse_sexp(text).context("board s-expression")?;
     if head(&expr) != Some("kicad_pcb") {
@@ -25,7 +29,7 @@ pub fn parse_board(text: &str) -> Result<BoardGeometry> {
     let mask_expansion = board_mask_expansion(&expr);
     let mut shapes = Vec::new();
     let mut footprints = Vec::new();
-    let mut edge_lines: Vec<(Point, Point)> = Vec::new();
+    let mut edge_lines: Vec<EdgeSeg> = Vec::new();
     for item in children(&expr).iter().skip(1) {
         match head(item) {
             Some("footprint") => {
@@ -58,6 +62,7 @@ pub fn parse_board(text: &str) -> Result<BoardGeometry> {
         }
     }
     shapes.extend(chain_edge(edge_lines));
+    mark_cutouts(&mut shapes);
     let (outer_copper_mm, inner_copper_mm) = copper_thickness(&expr);
     Ok(BoardGeometry {
         copper_layers: copper,
@@ -186,7 +191,7 @@ fn footprint(
     mask_expansion: f64,
     shapes: &mut Vec<Shape>,
     footprints: &mut Vec<pcbcraft_domain::geometry::FootprintName>,
-    edge_lines: &mut Vec<(Point, Point)>,
+    edge_lines: &mut Vec<EdgeSeg>,
 ) -> Result<()> {
     // A footprint saved on the board already has its flip baked into pad coordinates.
     // Mirroring again would throw every back-side part across its origin.
@@ -201,8 +206,16 @@ fn footprint(
             name: name.to_string(),
         });
     }
+    let mut yard_lines: Vec<(String, f64, Point, Point)> = Vec::new();
     for item in children(expr).iter().skip(1) {
         match head(item) {
+            Some("fp_line") if child_atom(item, "layer").is_some_and(|l| l.contains("CrtYd")) => {
+                if let (Some(start), Some(end)) = (xy_child(item, "start"), xy_child(item, "end")) {
+                    let layer = child_atom(item, "layer").unwrap_or("").to_string();
+                    let width = stroke_width(item).unwrap_or(0.0);
+                    yard_lines.push((layer, width, place.map_point(start), place.map_point(end)));
+                }
+            }
             Some("pad") => shapes.extend(pad_shapes(
                 item,
                 &place,
@@ -219,7 +232,60 @@ fn footprint(
             _ => {}
         }
     }
+    courtyard_loops(yard_lines, &reference, shapes);
     Ok(())
+}
+
+/// Courtyard drawn with lines: closed loops become filled outlines like `fp_rect`,
+/// anything open stays a set of thin strokes.
+fn courtyard_loops(
+    lines: Vec<(String, f64, Point, Point)>,
+    reference: &Option<String>,
+    shapes: &mut Vec<Shape>,
+) {
+    let mut layers: Vec<String> = lines.iter().map(|line| line.0.clone()).collect();
+    layers.dedup();
+    layers.sort();
+    layers.dedup();
+    for layer in layers {
+        let same: Vec<&(String, f64, Point, Point)> =
+            lines.iter().filter(|line| line.0 == layer).collect();
+        let width = same[0].1;
+        let pairs: Vec<(Point, Point)> = same.iter().map(|line| (line.2, line.3)).collect();
+        for (points, closed) in chain_lines(pairs) {
+            if closed {
+                let outline = polygon(&points);
+                let outline = if width > 0.0 {
+                    pcbcraft_domain::geometry::offset_outline(&outline, width / 2.0)
+                } else {
+                    outline
+                };
+                shapes.push(make_shape(
+                    Source::Courtyard,
+                    layer.clone(),
+                    reference.clone(),
+                    None,
+                    None,
+                    if width > 0.0 { Some(width) } else { None },
+                    true,
+                    ClearanceClass::None,
+                    false,
+                    outline,
+                ));
+            } else {
+                for pair in points.windows(2) {
+                    edge_lines_like_courtyard(
+                        shapes,
+                        &layer,
+                        reference.as_deref(),
+                        pair[0],
+                        pair[1],
+                        width,
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn pad_shapes(
@@ -241,7 +307,9 @@ fn pad_shapes(
     let layers = listed_copper(&layer_tokens(expr), copper);
     let expansion = child_number(expr, "solder_mask_margin").unwrap_or(board_mask_expansion);
     for local in locals {
-        let placed = place_pad(local, pad_at, -pad_rot, place);
+        // The pad angle in the file is absolute and already includes the footprint
+        // rotation, which `place` applies again, so only the difference goes here.
+        let placed = place_pad(local, pad_at, -(pad_rot - place.rot), place);
         for layer in &layers {
             let mut shape = make_shape(
                 Source::Pad,
@@ -261,7 +329,12 @@ fn pad_shapes(
         }
     }
     if let Some((drill, length)) = drill_size(expr) {
-        let placed = place_pad(drill_outline(expr).expect("drill"), pad_at, -pad_rot, place);
+        let placed = place_pad(
+            drill_outline(expr).expect("drill"),
+            pad_at,
+            -(pad_rot - place.rot),
+            place,
+        );
         let mut shape = make_shape(
             Source::Hole,
             "drill".to_string(),
@@ -568,7 +641,7 @@ fn graphic(
     expr: &SExpr,
     place: Place,
     shapes: &mut Vec<Shape>,
-    edge_lines: &mut Vec<(Point, Point)>,
+    edge_lines: &mut Vec<EdgeSeg>,
     reference: Option<&str>,
     board_level: bool,
 ) -> Result<()> {
@@ -593,7 +666,7 @@ fn graphic(
                 place.map_point(end)
             };
             if edge {
-                edge_lines.push((start, end));
+                edge_lines.push((start, end, None));
                 return Ok(());
             }
             if courtyard {
@@ -707,7 +780,7 @@ fn graphic(
             } else {
                 place.map_point(start)
             };
-            let _mid = if board_level {
+            let mid = if board_level {
                 mid
             } else {
                 place.map_point(mid)
@@ -718,10 +791,11 @@ fn graphic(
                 place.map_point(end)
             };
             if edge {
-                edge_lines.push((start, end));
+                edge_lines.push((start, end, Some(mid)));
                 return Ok(());
             }
-            Some(stadium(start, end, width.max(0.05)))
+            let width = width.max(0.05);
+            Some(arc_copper(start, mid, end, width).unwrap_or_else(|| stadium(start, end, width)))
         }
         "fp_text" | "gr_text" => {
             let at = xy_child(expr, "at").unwrap_or(Point::new(0.0, 0.0));
@@ -762,7 +836,8 @@ fn graphic(
     } else {
         Source::Graphic
     };
-    let blocks = courtyard || edge;
+    let copper_graphic = layer.ends_with(".Cu");
+    let blocks = courtyard || edge || copper_graphic;
     shapes.push(make_shape(
         source,
         layer,
@@ -773,6 +848,8 @@ fn graphic(
         blocks,
         if edge {
             ClearanceClass::Edge
+        } else if copper_graphic {
+            ClearanceClass::Copper { net: None }
         } else {
             ClearanceClass::None
         },
@@ -804,30 +881,106 @@ fn edge_lines_like_courtyard(
     ));
 }
 
-fn chain_edge(lines: Vec<(Point, Point)>) -> Vec<Shape> {
-    if lines.is_empty() {
-        return Vec::new();
+/// A closed Edge.Cuts loop that lies inside another one is a cutout. Its
+/// clearance grows outward like any obstacle. Only the outer outline is an inset.
+fn mark_cutouts(shapes: &mut [Shape]) {
+    let probes: Vec<(usize, Point)> = shapes
+        .iter()
+        .enumerate()
+        .filter(|(_, shape)| shape.source == Source::Edge && shape.inset)
+        .map(|(index, shape)| {
+            let point = match &shape.occupied {
+                Outline::Circle { center, .. } => *center,
+                Outline::Path(path) => path.start,
+            };
+            (index, point)
+        })
+        .collect();
+    let holes: Vec<usize> = probes
+        .iter()
+        .filter(|(index, point)| {
+            let nested = probes
+                .iter()
+                .filter(|(other, _)| other != index)
+                .filter(|(other, _)| {
+                    pcbcraft_domain::geometry::contains(&shapes[*other].occupied, *point)
+                })
+                .count();
+            nested % 2 == 1
+        })
+        .map(|(index, _)| *index)
+        .collect();
+    for index in holes {
+        shapes[index].inset = false;
     }
-    let mut unused = lines;
-    let mut shapes = Vec::new();
+}
+
+/// Join segments that share an end into chains. The flag tells a closed loop.
+/// Every segment is turned to follow the direction of travel.
+fn chain_segments(segments: Vec<EdgeSeg>) -> Vec<(Vec<EdgeSeg>, bool)> {
+    let mut unused = segments;
+    let mut chains = Vec::new();
     while !unused.is_empty() {
-        let (start, mut end) = unused.remove(0);
-        let mut points = vec![start, end];
+        let first = unused.remove(0);
+        let start = first.0;
+        let mut end = first.1;
+        let mut chain = vec![first];
         loop {
             let Some(index) = unused
                 .iter()
-                .position(|(a, b)| dist(*a, end) < 1e-4 || dist(*b, end) < 1e-4)
+                .position(|(a, b, _)| dist(*a, end) < 1e-4 || dist(*b, end) < 1e-4)
             else {
                 break;
             };
-            let (a, b) = unused.remove(index);
-            end = if dist(a, end) < 1e-4 { b } else { a };
-            points.push(end);
+            let (a, b, mid) = unused.remove(index);
+            if dist(a, end) < 1e-4 {
+                chain.push((end, b, mid));
+                end = b;
+            } else {
+                chain.push((end, a, mid));
+                end = a;
+            }
             if dist(end, start) < 1e-4 {
                 break;
             }
         }
-        let closed = points.len() >= 4 && dist(*points.last().unwrap(), start) < 1e-4;
+        let closed = chain.len() >= 3 && dist(end, start) < 1e-4;
+        chains.push((chain, closed));
+    }
+    chains
+}
+
+fn chain_lines(lines: Vec<(Point, Point)>) -> Vec<(Vec<Point>, bool)> {
+    chain_segments(lines.into_iter().map(|(a, b)| (a, b, None)).collect())
+        .into_iter()
+        .map(|(chain, closed)| {
+            let mut points = vec![chain[0].0];
+            points.extend(chain.iter().map(|segment| segment.1));
+            (points, closed)
+        })
+        .collect()
+}
+
+fn loop_outline(chain: &[EdgeSeg]) -> Outline {
+    let start = chain[0].0;
+    let last = chain.len() - 1;
+    let segments = chain
+        .iter()
+        .enumerate()
+        .map(|(index, (_, b, mid))| {
+            let to = if index == last { start } else { *b };
+            match mid {
+                Some(mid) => Curve::Arc { to, mid: *mid },
+                None => Curve::Line { to },
+            }
+        })
+        .collect();
+    Outline::Path(PathOutline { start, segments })
+}
+
+fn chain_edge(lines: Vec<EdgeSeg>) -> Vec<Shape> {
+    let mut shapes = Vec::new();
+    for (chain, closed) in chain_segments(lines) {
         if closed {
             shapes.push(make_shape(
                 Source::Edge,
@@ -839,10 +992,13 @@ fn chain_edge(lines: Vec<(Point, Point)>) -> Vec<Shape> {
                 true,
                 ClearanceClass::Edge,
                 true,
-                polygon(&points),
+                loop_outline(&chain),
             ));
         } else {
-            for pair in points.windows(2) {
+            for (a, b, mid) in chain {
+                let outline = mid
+                    .and_then(|mid| arc_copper(a, mid, b, 0.05))
+                    .unwrap_or_else(|| stadium(a, b, 0.05));
                 shapes.push(make_shape(
                     Source::Edge,
                     "Edge.Cuts".into(),
@@ -853,7 +1009,7 @@ fn chain_edge(lines: Vec<(Point, Point)>) -> Vec<Shape> {
                     true,
                     ClearanceClass::Edge,
                     false,
-                    stadium(pair[0], pair[1], 0.05),
+                    outline,
                 ));
             }
         }
@@ -891,25 +1047,51 @@ fn arc_copper(start: Point, mid: Point, end: Point, width: f64) -> Option<Outlin
     if width <= 0.0 {
         return None;
     }
+    let (center, radius) = circle_of(start, mid, end)?;
+    let half = width / 2.0;
+    let outer = radius + half;
+    let inner = (radius - half).max(1e-4);
+    let at = |point: Point, r: f64| {
+        let dx = point.x - center.x;
+        let dy = point.y - center.y;
+        let length = (dx * dx + dy * dy).sqrt();
+        Point::new(center.x + dx / length * r, center.y + dy / length * r)
+    };
+    // Counterclockwise in the file's own axes when the turn start -> mid -> end is positive.
+    let ccw = (mid.x - start.x) * (end.y - mid.y) - (mid.y - start.y) * (end.x - mid.x) > 0.0;
+    let forward = |point: Point| {
+        let (dx, dy) = (point.x - center.x, point.y - center.y);
+        let length = (dx * dx + dy * dy).sqrt();
+        let (tx, ty) = if ccw { (-dy, dx) } else { (dy, -dx) };
+        Point::new(tx / length, ty / length)
+    };
+    let end_tip = {
+        let t = forward(end);
+        Point::new(end.x + t.x * half, end.y + t.y * half)
+    };
+    let start_tip = {
+        let t = forward(start);
+        Point::new(start.x - t.x * half, start.y - t.y * half)
+    };
+    let start_outer = at(start, outer);
     Some(Outline::Path(PathOutline {
-        start,
+        start: start_outer,
         segments: vec![
-            Curve::Arc { to: end, mid },
             Curve::Arc {
-                to: start,
-                mid: {
-                    let (center, radius) = circle_of(start, mid, end)?;
-                    let outward_x = mid.x - center.x;
-                    let outward_y = mid.y - center.y;
-                    let length = (outward_x * outward_x + outward_y * outward_y).sqrt();
-                    if length < 1e-9 {
-                        return None;
-                    }
-                    Point::new(
-                        center.x - outward_x / length * radius,
-                        center.y - outward_y / length * radius,
-                    )
-                },
+                to: at(end, outer),
+                mid: at(mid, outer),
+            },
+            Curve::Arc {
+                to: at(end, inner),
+                mid: end_tip,
+            },
+            Curve::Arc {
+                to: at(start, inner),
+                mid: at(mid, inner),
+            },
+            Curve::Arc {
+                to: start_outer,
+                mid: start_tip,
             },
         ],
     }))
@@ -1408,5 +1590,171 @@ mod tests {
             r#"(kicad_pcb (layers (0 "F.Cu" signal)) (footprint "R" (layer "F.Cu") (at 0 0) (pad "1" smd trapezoid (at 0 0) (size 1 1) (layers "F.Cu"))))"#,
         );
         assert!(err.unwrap_err().to_string().contains("trapezoid"));
+    }
+
+    fn parsed(text: &str, edge: f64) -> BoardGeometry {
+        let mut board = parse_board(text).unwrap();
+        apply_clearance(
+            &mut board,
+            &ClearanceRules {
+                min_clearance: 0.2,
+                min_hole_clearance: 0.25,
+                min_copper_edge_clearance: edge,
+                classes: Vec::new(),
+                patterns: Vec::new(),
+            },
+        );
+        board
+    }
+
+    fn blocked(board: &BoardGeometry, x: f64, y: f64) -> bool {
+        board
+            .shapes
+            .iter()
+            .any(|shape| point_blocked(shape, Point::new(x, y)))
+    }
+
+    #[test]
+    fn an_inner_cutout_is_an_obstacle_not_the_whole_board() {
+        let board = parsed(
+            r#"(kicad_pcb (layers (0 "F.Cu" signal))
+              (gr_rect (start 0 0) (end 50 50) (stroke (width 0.05)) (layer "Edge.Cuts"))
+              (gr_rect (start 40 40) (end 45 45) (stroke (width 0.05)) (layer "Edge.Cuts")))"#,
+            0.5,
+        );
+        assert!(!blocked(&board, 20.0, 20.0));
+        assert!(blocked(&board, 42.0, 42.0));
+        assert!(blocked(&board, 39.7, 42.0));
+        assert!(!blocked(&board, 39.0, 42.0));
+        assert!(blocked(&board, 0.2, 20.0));
+        assert!(blocked(&board, -1.0, 20.0));
+    }
+
+    #[test]
+    fn zero_edge_clearance_still_leaves_the_board_free() {
+        let board = parsed(
+            r#"(kicad_pcb (layers (0 "F.Cu" signal))
+              (gr_rect (start 0 0) (end 50 50) (stroke (width 0.05)) (layer "Edge.Cuts")))"#,
+            0.0,
+        );
+        assert!(!blocked(&board, 25.0, 25.0));
+        assert!(blocked(&board, 60.0, 25.0));
+    }
+
+    #[test]
+    fn an_arc_track_is_a_ring_sector_not_a_disk() {
+        let board = parsed(
+            r#"(kicad_pcb (layers (0 "F.Cu" signal))
+              (arc (start 5 0) (mid 0 5) (end -5 0) (width 0.2) (layer "F.Cu") (net "A")))"#,
+            0.5,
+        );
+        assert!(!blocked(&board, 0.0, 1.0));
+        assert!(!blocked(&board, 0.0, 0.0));
+        assert!(blocked(&board, 0.0, 5.0));
+        assert!(blocked(&board, 0.0, 5.25));
+        assert!(blocked(&board, 3.5355, 3.5355));
+        assert!(!blocked(&board, 0.0, 5.6));
+        assert!(!blocked(&board, 0.0, -5.0));
+    }
+
+    #[test]
+    fn a_pad_angle_in_the_file_is_not_rotated_again_by_the_footprint() {
+        let board = parsed(
+            r#"(kicad_pcb (layers (0 "F.Cu" signal))
+              (footprint "X" (layer "F.Cu") (at 10 10 90)
+                (property "Reference" "U1" (at 0 0 90) (layer "F.Fab"))
+                (pad "1" smd rect (at 0 0 90) (size 2 0.5) (layers "F.Cu") (net "A"))))"#,
+            0.5,
+        );
+        let pad = board
+            .shapes
+            .iter()
+            .find(|shape| shape.source == Source::Pad)
+            .unwrap();
+        assert!(contains(&pad.occupied, Point::new(10.0, 10.9)));
+        assert!(!contains(&pad.occupied, Point::new(10.9, 10.0)));
+    }
+
+    #[test]
+    fn a_point_on_the_line_arc_joint_of_a_roundrect_is_inside() {
+        let board = parsed(
+            r#"(kicad_pcb (layers (0 "F.Cu" signal))
+              (footprint "X" (layer "F.Cu") (at 0 0)
+                (property "Reference" "U1" (at 0 0) (layer "F.Fab"))
+                (pad "1" smd roundrect (at 0 0) (size 4 2) (layers "F.Cu")
+                  (roundrect_rratio 0.25) (net "A"))))"#,
+            0.5,
+        );
+        let pad = board
+            .shapes
+            .iter()
+            .find(|shape| shape.source == Source::Pad)
+            .unwrap();
+        for y in [-0.6, -0.5, -0.4, 0.0, 0.5] {
+            assert!(contains(&pad.occupied, Point::new(0.0, y)), "{y}");
+        }
+    }
+
+    #[test]
+    fn copper_graphics_block_and_courtyard_lines_close_into_a_filled_loop() {
+        let board = parsed(
+            r#"(kicad_pcb (layers (0 "F.Cu" signal))
+              (footprint "X" (layer "F.Cu") (at 0 0)
+                (property "Reference" "U1" (at 0 0) (layer "F.Fab"))
+                (fp_line (start -2 -1) (end 2 -1) (stroke (width 0.05)) (layer "F.CrtYd"))
+                (fp_line (start 2 -1) (end 2 1) (stroke (width 0.05)) (layer "F.CrtYd"))
+                (fp_line (start 2 1) (end -2 1) (stroke (width 0.05)) (layer "F.CrtYd"))
+                (fp_line (start -2 1) (end -2 -1) (stroke (width 0.05)) (layer "F.CrtYd"))
+                (fp_poly (pts (xy 5 5) (xy 6 5) (xy 6 6) (xy 5 6)) (stroke (width 0)) (layer "F.Cu"))))"#,
+            0.5,
+        );
+        assert!(blocked(&board, 0.0, 0.0));
+        assert!(blocked(&board, 5.5, 5.5));
+    }
+
+    #[test]
+    fn rounded_board_corners_keep_their_arcs_and_inset_follows_them() {
+        let board = parsed(
+            r#"(kicad_pcb (layers (0 "F.Cu" signal))
+              (gr_arc (start 0 5) (mid 1.464466 1.464466) (end 5 0) (stroke (width 0.05)) (layer "Edge.Cuts"))
+              (gr_line (start 5 0) (end 45 0) (stroke (width 0.05)) (layer "Edge.Cuts"))
+              (gr_arc (start 45 0) (mid 48.535534 1.464466) (end 50 5) (stroke (width 0.05)) (layer "Edge.Cuts"))
+              (gr_line (start 50 5) (end 50 45) (stroke (width 0.05)) (layer "Edge.Cuts"))
+              (gr_arc (start 50 45) (mid 48.535534 48.535534) (end 45 50) (stroke (width 0.05)) (layer "Edge.Cuts"))
+              (gr_line (start 45 50) (end 5 50) (stroke (width 0.05)) (layer "Edge.Cuts"))
+              (gr_arc (start 5 50) (mid 1.464466 48.535534) (end 0 45) (stroke (width 0.05)) (layer "Edge.Cuts"))
+              (gr_line (start 0 45) (end 0 5) (stroke (width 0.05)) (layer "Edge.Cuts")))"#,
+            0.5,
+        );
+        assert_eq!(
+            board
+                .shapes
+                .iter()
+                .filter(|shape| shape.source == Source::Edge)
+                .count(),
+            1
+        );
+        // Chords would put (2,2) outside the board; the arc keeps it 0.74 mm inside.
+        assert!(!blocked(&board, 2.0, 2.0));
+        assert!(!blocked(&board, 25.0, 25.0));
+        assert!(blocked(&board, 1.5, 1.5));
+        assert!(blocked(&board, 0.3, 25.0));
+        assert!(blocked(&board, -1.0, 25.0));
+        assert!(blocked(&board, 49.8, 25.0));
+        assert!(!blocked(&board, 49.0, 25.0));
+    }
+
+    #[test]
+    fn a_clockwise_arc_track_is_the_same_ring() {
+        let board = parsed(
+            r#"(kicad_pcb (layers (0 "F.Cu" signal))
+              (arc (start -5 0) (mid 0 5) (end 5 0) (width 0.2) (layer "F.Cu") (net "A")))"#,
+            0.5,
+        );
+        assert!(!blocked(&board, 0.0, 1.0));
+        assert!(blocked(&board, 0.0, 5.0));
+        assert!(blocked(&board, 0.0, 5.25));
+        assert!(!blocked(&board, 0.0, 5.6));
+        assert!(!blocked(&board, 0.0, 4.4));
     }
 }

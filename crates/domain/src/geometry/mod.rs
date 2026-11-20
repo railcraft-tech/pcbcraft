@@ -1,4 +1,5 @@
-//! Board outlines in pcbnew coordinates: millimetres, Y up.
+//! Board outlines in the coordinates of the `.kicad_pcb` file: millimetres, Y grows
+//! downward on screen, as in pcbnew.
 
 mod separation;
 
@@ -16,8 +17,6 @@ pub enum GeometryError {
     BadPrecision,
     #[error("window '{0}' is not XMIN-XMAXxYMIN-YMAX")]
     BadWindow(String),
-    #[error("cached geometry cannot be read")]
-    BadCache,
     #[error("no symbol '{0}'")]
     NoSymbol(String),
     #[error("length '{0}' is not a number of millimetres")]
@@ -254,7 +253,9 @@ pub fn apply_clearance(board: &mut BoardGeometry, rules: &ClearanceRules) {
             ClearanceClass::None => 0.0,
         };
         shape.clearance_mm = distance;
-        if distance.abs() < EPS || matches!(shape.clearance_class, ClearanceClass::None) {
+        if matches!(shape.clearance_class, ClearanceClass::None)
+            || (distance.abs() < EPS && !shape.inset)
+        {
             shape.clearance_mm = 0.0;
             shape.inward = false;
             shape.clearance = shape.occupied.clone();
@@ -492,6 +493,77 @@ pub fn point_blocked(shape: &Shape, point: Point) -> bool {
     } else {
         contains(&shape.clearance, point)
     }
+}
+
+/// Paths with more segments than this are cut down to the window.
+const CLIP_ABOVE: usize = 32;
+
+/// One side of a clip window: keeps a point, and cuts a segment where it crosses.
+type Keep = fn(Point, Window) -> bool;
+type Cut = fn(Point, Point, Window) -> Point;
+
+/// Arcs in a clipped path are flattened to within this many millimetres.
+const CLIP_FLATTEN_MM: f64 = 5e-4;
+
+/// The part of `outline` that lies inside `window`, so the area inside the
+/// window stays the same. Big polygons (zone fills and their clearance) are
+/// cut with Sutherland-Hodgman. Their arcs become short lines, and the result
+/// may gain edges along the window border. Circles and small paths are
+/// returned as they are. `None` means no area is left.
+pub fn clip_outline(outline: &Outline, window: Window) -> Option<Outline> {
+    let bounds = outline_bounds(outline);
+    if !bounds_meet(bounds, window) {
+        return None;
+    }
+    let Outline::Path(path) = outline else {
+        return Some(outline.clone());
+    };
+    let inside = bounds.min_x >= window.x_min
+        && bounds.max_x <= window.x_max
+        && bounds.min_y >= window.y_min
+        && bounds.max_y <= window.y_max;
+    if inside || path.segments.len() <= CLIP_ABOVE {
+        return Some(outline.clone());
+    }
+    let mut points = sample_path(path, CLIP_FLATTEN_MM);
+    // Each side: is the point kept, and where does a segment cross that side.
+    let sides: [(Keep, Cut); 4] = [
+        (|p, w| p.x >= w.x_min, |a, b, w| cut_x(a, b, w.x_min)),
+        (|p, w| p.x <= w.x_max, |a, b, w| cut_x(a, b, w.x_max)),
+        (|p, w| p.y >= w.y_min, |a, b, w| cut_y(a, b, w.y_min)),
+        (|p, w| p.y <= w.y_max, |a, b, w| cut_y(a, b, w.y_max)),
+    ];
+    for (keep, cut) in sides {
+        let mut next = Vec::with_capacity(points.len());
+        for index in 0..points.len() {
+            let current = points[index];
+            let previous = points[(index + points.len() - 1) % points.len()];
+            match (keep(previous, window), keep(current, window)) {
+                (true, true) => next.push(current),
+                (true, false) => next.push(cut(previous, current, window)),
+                (false, true) => {
+                    next.push(cut(previous, current, window));
+                    next.push(current);
+                }
+                (false, false) => {}
+            }
+        }
+        points = next;
+        if points.len() < 3 {
+            return None;
+        }
+    }
+    Some(polygon(&points))
+}
+
+fn cut_x(a: Point, b: Point, x: f64) -> Point {
+    let t = (x - a.x) / (b.x - a.x);
+    Point::new(x, a.y + (b.y - a.y) * t)
+}
+
+fn cut_y(a: Point, b: Point, y: f64) -> Point {
+    let t = (y - a.y) / (b.y - a.y);
+    Point::new(a.x + (b.x - a.x) * t, y)
 }
 
 pub fn sample_outline(outline: &Outline, tolerance: f64) -> Vec<Point> {
@@ -858,8 +930,12 @@ fn chord_step(radius: f64, tolerance: f64) -> f64 {
 
 fn format_coord(value: f64, step: f64) -> String {
     let snapped = (value / step).round() * step;
-    let decimals = step.abs().log10().abs().ceil() as usize;
-    let decimals = decimals.min(8);
+    let decimals = (0..=8usize)
+        .find(|decimals| {
+            let scaled = step.abs() * 10f64.powi(*decimals as i32);
+            (scaled - scaled.round()).abs() < 1e-6
+        })
+        .unwrap_or(8);
     let mut text = format!("{snapped:.decimals$}");
     if text.contains('.') {
         while text.ends_with('0') {
@@ -939,6 +1015,8 @@ fn point_in_path(path: &PathOutline, point: Point) -> bool {
     if distance_to_path(path, point) <= 1e-6 {
         return true;
     }
+    // Ray towards +X. A vertex on the ray counts as "not above", for lines and
+    // arcs alike, so a joint is never counted twice.
     let mut crossings = 0;
     let mut cursor = path.start;
     for curve in &path.segments {
@@ -951,10 +1029,29 @@ fn point_in_path(path: &PathOutline, point: Point) -> bool {
             }
             Curve::Arc { to, mid } => {
                 if let Some((center, radius)) = circle_through(cursor, *mid, *to) {
+                    let direction = signed_sweep(cursor, *mid, *to, center).signum();
+                    // A point a hair inside the arc, next to the endpoint at `from`.
+                    let nudged = |from: Point, towards: f64| {
+                        let angle = 1e-3 * direction * towards;
+                        let (sin, cos) = angle.sin_cos();
+                        let (dx, dy) = (from.x - center.x, from.y - center.y);
+                        center.y + dx * sin + dy * cos
+                    };
+                    let above = |y: f64| y > point.y + 1e-9;
                     for hit in ray_circle(point, Point::new(1.0, 0.0), center, radius) {
-                        if hit > 1e-8
-                            && on_arc(cursor, *mid, *to, center, add(point, Point::new(hit, 0.0)))
-                        {
+                        let at = add(point, Point::new(hit, 0.0));
+                        if !on_arc(cursor, *mid, *to, center, at) {
+                            continue;
+                        }
+                        if distance(at, cursor) < 1e-7 {
+                            if above(nudged(cursor, 1.0)) {
+                                crossings += 1;
+                            }
+                        } else if distance(at, *to) < 1e-7 {
+                            if above(nudged(*to, -1.0)) {
+                                crossings += 1;
+                            }
+                        } else {
                             crossings += 1;
                         }
                     }
@@ -994,8 +1091,8 @@ fn distance_to_path(path: &PathOutline, point: Point) -> f64 {
 }
 
 fn segment_crosses_ray(start: Point, end: Point, origin: Point) -> bool {
-    let (y0, y1) = (start.y, end.y);
-    if (y0 > origin.y) == (y1 > origin.y) {
+    let above = |y: f64| y > origin.y + 1e-9;
+    if above(start.y) == above(end.y) {
         return false;
     }
     let x = start.x + (origin.y - start.y) * (end.x - start.x) / (end.y - start.y);
@@ -1150,7 +1247,38 @@ fn offset_path(path: &PathOutline, distance: f64) -> PathOutline {
             return offset_polygon(&points, distance);
         }
     }
+    // The offset helpers assume a counterclockwise outline, so a positive distance grows it.
+    let edges = if path_area(path) < 0.0 {
+        reverse_edges(edges)
+    } else {
+        edges
+    };
     offset_curved(&edges, distance).unwrap_or_else(|| path.clone())
+}
+
+fn path_area(path: &PathOutline) -> f64 {
+    let mut points = vec![path.start];
+    for curve in &path.segments {
+        match curve {
+            Curve::Line { to } => points.push(*to),
+            Curve::Arc { to, mid } => {
+                points.push(*mid);
+                points.push(*to);
+            }
+        }
+    }
+    signed_area(&points)
+}
+
+fn reverse_edges(edges: Vec<Edge>) -> Vec<Edge> {
+    edges
+        .into_iter()
+        .rev()
+        .map(|edge| match edge {
+            Edge::Line { a, b } => Edge::Line { a: b, b: a },
+            Edge::Arc { a, b, mid } => Edge::Arc { a: b, b: a, mid },
+        })
+        .collect()
 }
 
 enum Edge {
@@ -1262,61 +1390,177 @@ fn corners_to_path(corners: &[Corner]) -> PathOutline {
     PathOutline { start, segments }
 }
 
+/// One offset edge. `circle` is set for arcs, so corners can be intersected exactly.
+struct Offset {
+    a: Point,
+    b: Point,
+    mid: Option<Point>,
+    circle: Option<(Point, f64)>,
+}
+
+#[allow(clippy::needless_range_loop)]
 fn offset_curved(edges: &[Edge], distance: f64) -> Option<PathOutline> {
-    let mut offset = Vec::new();
+    let mut offsets = Vec::new();
     for edge in edges {
-        offset.push(offset_edge(edge, distance)?);
+        offsets.push(offset_edge(edge, distance)?);
     }
-    let start = offset[0].0;
+    let count = offsets.len();
+    // Corners: round on the outer side, intersected on the inner side.
+    let mut rounds: Vec<Option<Point>> = vec![None; count];
+    for index in 0..count {
+        let next = (index + 1) % count;
+        let gap = distance_pts(offsets[index].b, offsets[next].a);
+        if gap <= 1e-6 {
+            continue;
+        }
+        let vertex = edge_end(&edges[index]);
+        let turn = cross(
+            edge_tangent(&edges[index], true),
+            edge_tangent(&edges[next], false),
+        );
+        let convex = turn > 0.0;
+        let outer = if distance >= 0.0 { convex } else { !convex };
+        let from = offsets[index].b;
+        let to = offsets[next].a;
+        if outer {
+            let toward = norm(add(sub(from, vertex), sub(to, vertex)));
+            rounds[index] = Some(add(vertex, scale(toward, distance.abs())));
+            continue;
+        }
+        let hint = Point::new((from.x + to.x) / 2.0, (from.y + to.y) / 2.0);
+        if let Some(hit) = intersect_offsets(&offsets[index], &offsets[next], hint) {
+            offsets[index].b = hit;
+            offsets[next].a = hit;
+        }
+    }
+    let start = offsets[0].a;
     let mut segments = Vec::new();
     let mut cursor = start;
-    for (index, (a, b, mid)) in offset.iter().enumerate() {
-        if distance_pts(cursor, *a) > 1e-6 {
-            let vertex = match &edges[index] {
-                Edge::Line { a, .. } | Edge::Arc { a, .. } => *a,
-            };
-            let mid_point = add(
-                vertex,
-                scale(
-                    norm(add(sub(cursor, vertex), sub(*a, vertex))),
-                    distance.abs(),
-                ),
-            );
-            segments.push(Curve::Arc {
-                to: *a,
-                mid: mid_point,
-            });
+    for index in 0..count {
+        let offset = &offsets[index];
+        if distance_pts(cursor, offset.a) > 1e-6 {
+            match index.checked_sub(1).and_then(|previous| rounds[previous]) {
+                Some(mid) => segments.push(Curve::Arc { to: offset.a, mid }),
+                None => segments.push(Curve::Line { to: offset.a }),
+            }
         }
-        match mid {
-            Some(mid) => segments.push(Curve::Arc { to: *b, mid: *mid }),
-            None => segments.push(Curve::Line { to: *b }),
+        match offset.mid {
+            Some(mid) => segments.push(Curve::Arc { to: offset.b, mid }),
+            None => segments.push(Curve::Line { to: offset.b }),
         }
-        cursor = *b;
+        cursor = offset.b;
     }
     if distance_pts(cursor, start) > 1e-6 {
-        segments.push(Curve::Line { to: start });
+        match rounds[count - 1] {
+            Some(mid) => segments.push(Curve::Arc { to: start, mid }),
+            None => segments.push(Curve::Line { to: start }),
+        }
     }
     Some(PathOutline { start, segments })
 }
 
-fn offset_edge(edge: &Edge, distance: f64) -> Option<(Point, Point, Option<Point>)> {
+fn edge_end(edge: &Edge) -> Point {
+    match edge {
+        Edge::Line { b, .. } | Edge::Arc { b, .. } => *b,
+    }
+}
+
+/// Unit direction of travel at the end (`at_end`) or the start of an edge.
+fn edge_tangent(edge: &Edge, at_end: bool) -> Point {
+    match edge {
+        Edge::Line { a, b } => norm(sub(*b, *a)),
+        Edge::Arc { a, b, mid } => {
+            let Some((center, _)) = circle_through(*a, *mid, *b) else {
+                return norm(sub(*b, *a));
+            };
+            let ccw = cross(sub(*mid, *a), sub(center, *a)) > 0.0;
+            let point = if at_end { *b } else { *a };
+            let radial = norm(sub(point, center));
+            if ccw {
+                Point::new(-radial.y, radial.x)
+            } else {
+                Point::new(radial.y, -radial.x)
+            }
+        }
+    }
+}
+
+/// Where two offset edges meet, taken from the candidates nearest to `hint`.
+fn intersect_offsets(first: &Offset, second: &Offset, hint: Point) -> Option<Point> {
+    let candidates: Vec<Point> = match (first.circle, second.circle) {
+        (None, None) => {
+            let one = norm(sub(first.b, first.a));
+            let two = norm(sub(second.b, second.a));
+            line_intersect(first.a, one, second.a, two)
+                .into_iter()
+                .collect()
+        }
+        (Some((center, radius)), None) => line_circle(second.a, second.b, center, radius),
+        (None, Some((center, radius))) => line_circle(first.a, first.b, center, radius),
+        (Some(one), Some(two)) => circle_circle(one, two),
+    };
+    candidates
+        .into_iter()
+        .min_by(|left, right| distance_pts(*left, hint).total_cmp(&distance_pts(*right, hint)))
+        .filter(|hit| distance_pts(*hit, hint) < 1.0 + distance_pts(first.b, second.a))
+}
+
+fn line_circle(a: Point, b: Point, center: Point, radius: f64) -> Vec<Point> {
+    let direction = norm(sub(b, a));
+    let offset = sub(a, center);
+    let half = dot(offset, direction);
+    let disc = half * half - (dot(offset, offset) - radius * radius);
+    if disc < 0.0 {
+        return Vec::new();
+    }
+    let root = disc.sqrt();
+    vec![
+        add(a, scale(direction, -half - root)),
+        add(a, scale(direction, -half + root)),
+    ]
+}
+
+fn circle_circle(one: (Point, f64), two: (Point, f64)) -> Vec<Point> {
+    let (c0, r0) = one;
+    let (c1, r1) = two;
+    let d = distance_pts(c0, c1);
+    if d < EPS || d > r0 + r1 || d < (r0 - r1).abs() {
+        return Vec::new();
+    }
+    let along = (r0 * r0 - r1 * r1 + d * d) / (2.0 * d);
+    let height = (r0 * r0 - along * along).max(0.0).sqrt();
+    let axis = scale(sub(c1, c0), 1.0 / d);
+    let base = add(c0, scale(axis, along));
+    let side = Point::new(-axis.y, axis.x);
+    vec![
+        add(base, scale(side, height)),
+        add(base, scale(side, -height)),
+    ]
+}
+
+fn offset_edge(edge: &Edge, distance: f64) -> Option<Offset> {
     match edge {
         Edge::Line { a, b } => {
             let normal = right_normal(norm(sub(*b, *a)));
-            Some((
-                add(*a, scale(normal, distance)),
-                add(*b, scale(normal, distance)),
-                None,
-            ))
+            Some(Offset {
+                a: add(*a, scale(normal, distance)),
+                b: add(*b, scale(normal, distance)),
+                mid: None,
+                circle: None,
+            })
         }
         Edge::Arc { a, b, mid } => {
             let (center, radius) = circle_through(*a, *mid, *b)?;
-            let motion = sub(*mid, *a);
-            let ccw = cross(motion, sub(center, *a)) > 0.0;
+            let ccw = cross(sub(*mid, *a), sub(center, *a)) > 0.0;
             let grow = if ccw { distance } else { -distance };
             let grown = (radius + grow).max(0.0);
             let place = |point: Point| add(center, scale(norm(sub(point, center)), grown));
-            Some((place(*a), place(*b), Some(place(*mid))))
+            Some(Offset {
+                a: place(*a),
+                b: place(*b),
+                mid: Some(place(*mid)),
+                circle: Some((center, grown)),
+            })
         }
     }
 }
@@ -1637,5 +1881,53 @@ mod tests {
         assert!(points.len() > 8);
         let snapped = format_points(&[Point::new(0.1, 5.5), Point::new(0.104, 5.5)], 0.01);
         assert_eq!(snapped, vec!["0.1x5.5".to_string()]);
+    }
+
+    #[test]
+    fn clipping_a_big_concave_polygon_keeps_the_area_inside_the_window() {
+        // A 96-point star, so the polygon is concave and above the clip threshold.
+        let points: Vec<Point> = (0..96)
+            .map(|index| {
+                let angle = std::f64::consts::TAU * index as f64 / 96.0;
+                let radius = if index % 2 == 0 { 50.0 } else { 30.0 };
+                Point::new(radius * angle.cos(), radius * angle.sin())
+            })
+            .collect();
+        let star = polygon(&points);
+        let window = Window {
+            x_min: 10.0,
+            x_max: 40.0,
+            y_min: -8.0,
+            y_max: 14.0,
+        };
+        let clipped = clip_outline(&star, window).unwrap();
+        let Outline::Path(path) = &clipped else {
+            panic!("path");
+        };
+        assert!(path.segments.len() < 40, "{}", path.segments.len());
+        let mut checked = 0;
+        for xi in 0..=60 {
+            for yi in 0..=44 {
+                let point = Point::new(10.0 + xi as f64 * 0.5, -8.0 + yi as f64 * 0.5);
+                // Points on the window border can sit on a bridging edge.
+                if xi == 0 || xi == 60 || yi == 0 || yi == 44 {
+                    continue;
+                }
+                assert_eq!(
+                    contains(&star, point),
+                    contains(&clipped, point),
+                    "{point:?}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 2000);
+        let far = Window {
+            x_min: 200.0,
+            x_max: 210.0,
+            y_min: 0.0,
+            y_max: 10.0,
+        };
+        assert!(clip_outline(&star, far).is_none());
     }
 }

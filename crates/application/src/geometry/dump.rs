@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use pcbcraft_domain::geometry::{
-    format_points, sample_outline, shape_meets_window, union_window, BoardGeometry, Curve,
-    GeometryError, Outline, Shape, Window,
+    clip_outline, format_points, sample_outline, shape_meets_window, union_window, BoardGeometry,
+    Curve, GeometryError, Outline, PathOutline, Point, Shape, Window,
 };
 use serde_json::{json, Map, Value};
 
@@ -20,6 +20,16 @@ impl Default for DumpOptions {
             detailed: false,
             precision: 0.01,
         }
+    }
+}
+
+/// Output is rounded to a nanometre, which hides float noise like 59.70000000022958.
+pub(crate) fn round_mm(value: f64) -> f64 {
+    let rounded = (value * 1e6).round() / 1e6;
+    if rounded == 0.0 {
+        0.0
+    } else {
+        rounded
     }
 }
 
@@ -48,8 +58,65 @@ pub fn dump_json(
     options: DumpOptions,
 ) -> Result<Value, GeometryError> {
     let view = dump_view(board, window, options)?;
+    match window {
+        // A zone fill can have tens of thousands of edges, so a window gets only its part.
+        Some(window) => {
+            let owned = clipped(&view.shapes, window);
+            let shapes: Vec<&Shape> = owned.iter().collect();
+            view_json(
+                &DumpView {
+                    window: view.window,
+                    shapes,
+                },
+                options,
+            )
+        }
+        None => view_json(&view, options),
+    }
+}
+
+/// Margin around a window kept when clipping, so tests just past its edge stay exact.
+const CLIP_MARGIN_MM: f64 = 1e-3;
+
+/// Copies of `shapes` cut down to `window`. The area inside the window is unchanged.
+pub(crate) fn clipped(shapes: &[&Shape], window: Window) -> Vec<Shape> {
+    let grown = Window {
+        x_min: window.x_min - CLIP_MARGIN_MM,
+        x_max: window.x_max + CLIP_MARGIN_MM,
+        y_min: window.y_min - CLIP_MARGIN_MM,
+        y_max: window.y_max + CLIP_MARGIN_MM,
+    };
+    let empty = || {
+        Outline::Path(PathOutline {
+            start: Point::new(grown.x_min, grown.y_min),
+            segments: Vec::new(),
+        })
+    };
+    shapes
+        .iter()
+        .filter_map(|shape| {
+            let mut copy = (*shape).clone();
+            let occupied = clip_outline(&shape.occupied, grown);
+            if shape.inward {
+                // Everything outside the outline blocks, so an empty cut still matters.
+                copy.occupied = occupied.unwrap_or_else(empty);
+                return Some(copy);
+            }
+            let clearance = clip_outline(&shape.clearance, grown);
+            if occupied.is_none() && clearance.is_none() {
+                return None;
+            }
+            copy.occupied = occupied.unwrap_or_else(empty);
+            copy.clearance = clearance.unwrap_or_else(empty);
+            Some(copy)
+        })
+        .collect()
+}
+
+/// JSON for a view that was already selected.
+pub fn view_json(view: &DumpView<'_>, options: DumpOptions) -> Result<Value, GeometryError> {
     let mut layers: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for shape in view.shapes {
+    for shape in &view.shapes {
         layers
             .entry(shape.layer.clone())
             .or_default()
@@ -58,10 +125,10 @@ pub fn dump_json(
     Ok(json!({
         "unit": "mm",
         "window": {
-            "xMin": view.window.x_min,
-            "xMax": view.window.x_max,
-            "yMin": view.window.y_min,
-            "yMax": view.window.y_max,
+            "xMin": round_mm(view.window.x_min),
+            "xMax": round_mm(view.window.x_max),
+            "yMin": round_mm(view.window.y_min),
+            "yMax": round_mm(view.window.y_max),
         },
         "layers": layers,
     }))
@@ -90,11 +157,11 @@ fn shape_json(shape: &Shape, options: DumpOptions) -> Result<Value, GeometryErro
         object.insert("net".into(), json!(net));
     }
     if let Some(width) = shape.width {
-        object.insert("width".into(), json!(width));
+        object.insert("width".into(), json!(round_mm(width)));
     }
     object.insert("occupied".into(), outline_json(&shape.occupied, options)?);
     if shape.blocks {
-        object.insert("clearanceMm".into(), json!(shape.clearance_mm));
+        object.insert("clearanceMm".into(), json!(round_mm(shape.clearance_mm)));
         object.insert("clearance".into(), outline_json(&shape.clearance, options)?);
         if shape.inward {
             object.insert("clearanceSide".into(), json!("inward"));
@@ -107,23 +174,29 @@ fn outline_json(outline: &Outline, options: DumpOptions) -> Result<Value, Geomet
     let mut value = match outline {
         Outline::Circle { center, radius } => json!({
             "kind": "circle",
-            "center": [center.x, center.y],
-            "radius": radius,
+            "center": [round_mm(center.x), round_mm(center.y)],
+            "radius": round_mm(*radius),
         }),
         Outline::Path(path) => {
             let segments: Vec<Value> = path
                 .segments
                 .iter()
                 .map(|curve| match curve {
-                    Curve::Line { to } => json!({"kind": "line", "to": [to.x, to.y]}),
+                    Curve::Line { to } => {
+                        json!({"kind": "line", "to": [round_mm(to.x), round_mm(to.y)]})
+                    }
                     Curve::Arc { to, mid } => {
-                        json!({"kind": "arc", "to": [to.x, to.y], "mid": [mid.x, mid.y]})
+                        json!({
+                            "kind": "arc",
+                            "to": [round_mm(to.x), round_mm(to.y)],
+                            "mid": [round_mm(mid.x), round_mm(mid.y)],
+                        })
                     }
                 })
                 .collect();
             json!({
                 "kind": "filled",
-                "start": [path.start.x, path.start.y],
+                "start": [round_mm(path.start.x), round_mm(path.start.y)],
                 "segments": segments,
             })
         }
@@ -169,125 +242,13 @@ pub fn find_symbol(board: &BoardGeometry, reference: &str) -> Result<Value, Geom
         "unit": "mm",
         "reference": reference,
         "window": {
-            "xMin": window.x_min,
-            "xMax": window.x_max,
-            "yMin": window.y_min,
-            "yMax": window.y_max,
+            "xMin": round_mm(window.x_min),
+            "xMax": round_mm(window.x_max),
+            "yMin": round_mm(window.y_min),
+            "yMax": round_mm(window.y_max),
         },
         "layers": layers,
     }))
-}
-
-/// Rebuild shapes from a full-board dump. `points` are ignored.
-pub fn board_from_dump(value: &Value) -> Result<BoardGeometry, GeometryError> {
-    let layers = value
-        .get("layers")
-        .and_then(Value::as_object)
-        .ok_or(GeometryError::BadCache)?;
-    let mut shapes = Vec::new();
-    for (layer, items) in layers {
-        let items = items.as_array().ok_or(GeometryError::BadCache)?;
-        for item in items {
-            shapes.push(shape_from_dump(layer, item)?);
-        }
-    }
-    Ok(BoardGeometry {
-        copper_layers: Vec::new(),
-        shapes,
-        outer_copper_mm: None,
-        inner_copper_mm: None,
-        footprints: Vec::new(),
-    })
-}
-
-fn shape_from_dump(layer: &str, value: &Value) -> Result<Shape, GeometryError> {
-    let source = value
-        .get("source")
-        .and_then(Value::as_str)
-        .and_then(pcbcraft_domain::geometry::Source::parse)
-        .ok_or(GeometryError::BadCache)?;
-    let occupied = outline_from_dump(value.get("occupied").ok_or(GeometryError::BadCache)?)?;
-    let inward = value.get("clearanceSide").and_then(Value::as_str) == Some("inward");
-    let (blocks, clearance_mm, clearance) = if let Some(clearance) = value.get("clearance") {
-        (
-            true,
-            value
-                .get("clearanceMm")
-                .and_then(Value::as_f64)
-                .ok_or(GeometryError::BadCache)?,
-            outline_from_dump(clearance)?,
-        )
-    } else {
-        (false, 0.0, occupied.clone())
-    };
-    Ok(Shape {
-        source,
-        layer: layer.to_string(),
-        reference: value.get("ref").and_then(Value::as_str).map(str::to_string),
-        pad: value.get("pad").and_then(Value::as_str).map(str::to_string),
-        net: value.get("net").and_then(Value::as_str).map(str::to_string),
-        width: value.get("width").and_then(Value::as_f64),
-        blocks,
-        clearance_class: pcbcraft_domain::geometry::ClearanceClass::None,
-        clearance_mm,
-        mask_expansion_mm: 0.0,
-        drill_length_mm: None,
-        pad_form: None,
-        text_height_mm: None,
-        inset: inward,
-        inward,
-        occupied,
-        clearance,
-    })
-}
-
-fn outline_from_dump(value: &Value) -> Result<Outline, GeometryError> {
-    match value.get("kind").and_then(Value::as_str) {
-        Some("circle") => {
-            let center = point_array(value.get("center").ok_or(GeometryError::BadCache)?)?;
-            let radius = value
-                .get("radius")
-                .and_then(Value::as_f64)
-                .ok_or(GeometryError::BadCache)?;
-            Ok(Outline::Circle { center, radius })
-        }
-        Some("filled") => {
-            let start = point_array(value.get("start").ok_or(GeometryError::BadCache)?)?;
-            let raw = value
-                .get("segments")
-                .and_then(Value::as_array)
-                .ok_or(GeometryError::BadCache)?;
-            let mut segments = Vec::with_capacity(raw.len());
-            for segment in raw {
-                let kind = segment.get("kind").and_then(Value::as_str);
-                let to = point_array(segment.get("to").ok_or(GeometryError::BadCache)?)?;
-                segments.push(match kind {
-                    Some("line") => Curve::Line { to },
-                    Some("arc") => Curve::Arc {
-                        to,
-                        mid: point_array(segment.get("mid").ok_or(GeometryError::BadCache)?)?,
-                    },
-                    _ => return Err(GeometryError::BadCache),
-                });
-            }
-            Ok(Outline::Path(pcbcraft_domain::geometry::PathOutline {
-                start,
-                segments,
-            }))
-        }
-        _ => Err(GeometryError::BadCache),
-    }
-}
-
-fn point_array(value: &Value) -> Result<pcbcraft_domain::geometry::Point, GeometryError> {
-    let pair = value.as_array().ok_or(GeometryError::BadCache)?;
-    if pair.len() != 2 {
-        return Err(GeometryError::BadCache);
-    }
-    Ok(pcbcraft_domain::geometry::Point::new(
-        pair[0].as_f64().ok_or(GeometryError::BadCache)?,
-        pair[1].as_f64().ok_or(GeometryError::BadCache)?,
-    ))
 }
 
 #[cfg(test)]
@@ -409,22 +370,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report["occupied"], json!(true));
-        assert_eq!(report["free"]["down"]["mm"], json!(0.0));
+        assert_eq!(report["free"]["up"]["mm"], json!(0.0));
         let clear =
             occupied_json(&board, Point::new(5.0, 1.0), OccupiedOptions::default()).unwrap();
         assert_eq!(clear["occupied"], json!(false));
-        let down = clear["free"]["down"]["mm"].as_f64().unwrap();
+        let down = clear["free"]["up"]["mm"].as_f64().unwrap();
         assert!((down - 0.725).abs() < 1e-3, "{down}");
-        assert_eq!(clear["free"]["down"]["source"], json!("track"));
-        assert_eq!(clear["free"]["up"]["limitedByWindow"], json!(true));
-        assert_eq!(clear["free"]["up"]["mm"], json!(5.0));
+        assert_eq!(clear["free"]["up"]["source"], json!("track"));
+        assert_eq!(clear["free"]["down"]["limitedByWindow"], json!(true));
+        assert_eq!(clear["free"]["down"]["mm"], json!(5.0));
     }
 
     #[test]
     fn omitting_the_window_keeps_shapes_outside_a_small_span() {
         let board = track_board();
         let whole = dump_json(&board, None, DumpOptions::default()).unwrap();
-        assert!(whole["layers"]["F.Cu"].as_array().unwrap().len() >= 1);
+        assert!(!whole["layers"]["F.Cu"].as_array().unwrap().is_empty());
         let cropped = dump_json(
             &board,
             Some(Window {
@@ -437,44 +398,6 @@ mod tests {
         )
         .unwrap();
         assert!(cropped["layers"].as_object().unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_full_dump_round_trips_and_still_filters_a_window() {
-        let board = track_board();
-        let dumped = dump_json(
-            &board,
-            None,
-            DumpOptions {
-                all: true,
-                detailed: false,
-                precision: 0.01,
-            },
-        )
-        .unwrap();
-        let restored = board_from_dump(&dumped).unwrap();
-        let cropped = dump_json(
-            &restored,
-            Some(Window {
-                x_min: 100.0,
-                x_max: 110.0,
-                y_min: 100.0,
-                y_max: 110.0,
-            }),
-            DumpOptions::default(),
-        )
-        .unwrap();
-        assert!(cropped["layers"].as_object().unwrap().is_empty());
-        let track = restored
-            .shapes
-            .iter()
-            .find(|shape| shape.source == Source::Track)
-            .unwrap();
-        assert!((track.width.unwrap() - 0.25).abs() < 1e-9);
-        assert!(pcbcraft_domain::geometry::contains(
-            &track.clearance,
-            Point::new(5.0, 0.2)
-        ));
     }
 
     #[test]
@@ -545,5 +468,69 @@ mod tests {
         assert_eq!(pads.len(), 1);
         assert_eq!(pads[0]["ref"], "J1");
         assert!(find_symbol(&board, "U1").is_err());
+    }
+
+    #[test]
+    fn output_is_rounded_to_a_nanometre_and_layers_filter_occupancy() {
+        assert_eq!(round_mm(59.70000000022958), 59.7);
+        assert_eq!(round_mm(-1e-9), 0.0);
+        let board = track_board();
+        let at = Point::new(5.0, 0.2);
+        let all = occupied_json(&board, at, OccupiedOptions::default()).unwrap();
+        assert_eq!(all["occupied"], json!(true));
+        let other = occupied_json(
+            &board,
+            at,
+            OccupiedOptions {
+                layers: Some(vec!["B.Cu".into()]),
+                ..OccupiedOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(other["occupied"], json!(false));
+        let same = occupied_json(
+            &board,
+            at,
+            OccupiedOptions {
+                layers: Some(vec!["F.Cu".into()]),
+                ..OccupiedOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(same["occupied"], json!(true));
+    }
+
+    #[test]
+    fn a_windowed_dump_keeps_only_the_window_part_of_a_big_zone() {
+        let mut board = track_board();
+        let ring: Vec<Point> = (0..400)
+            .map(|index| {
+                let angle = std::f64::consts::TAU * index as f64 / 400.0;
+                Point::new(100.0 * angle.cos(), 100.0 * angle.sin())
+            })
+            .collect();
+        let mut zone = board.shapes[0].clone();
+        zone.source = Source::Zone;
+        zone.width = None;
+        zone.occupied = pcbcraft_domain::geometry::polygon(&ring);
+        zone.clearance = zone.occupied.clone();
+        board.shapes.push(zone);
+        let window = Window {
+            x_min: -5.0,
+            x_max: 5.0,
+            y_min: -5.0,
+            y_max: 5.0,
+        };
+        let text = dump_json(&board, Some(window), DumpOptions::default())
+            .unwrap()
+            .to_string();
+        assert!(text.len() < 5_000, "{}", text.len());
+        let whole = dump_json(&board, None, DumpOptions::default())
+            .unwrap()
+            .to_string();
+        assert!(whole.len() > 20_000);
+        let report =
+            occupied_json(&board, Point::new(0.0, 3.0), OccupiedOptions::default()).unwrap();
+        assert_eq!(report["occupied"], json!(true));
     }
 }

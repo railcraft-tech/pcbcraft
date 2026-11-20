@@ -35,7 +35,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Test
-        run: cargo test --workspace --locked --lib --bins
+        run: cargo test --workspace --locked --lib --bins --tests
 
   build:
     name: Build ${{ matrix.target }}

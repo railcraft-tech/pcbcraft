@@ -11,10 +11,7 @@ impl SupplierCatalog for PcbwayCatalog {
     }
 
     fn fetch(&self, part_ids: &[String]) -> Result<Vec<PartRecord>> {
-        part_ids
-            .iter()
-            .map(|id| self.lookup(id))
-            .collect()
+        part_ids.iter().map(|id| self.lookup(id)).collect()
     }
 
     fn search(&self, query: &PcbwayQuery) -> Result<Vec<PartRecord>> {
@@ -33,9 +30,7 @@ impl PcbwayCatalog {
     fn lookup(&self, mpn: &str) -> Result<PartRecord> {
         // Partner API quotes boards and assembly. It does not publish a part catalog.
         let _ = mpn;
-        bail!(
-            "PCBWay catalog cannot be queried: the public partner API has no part search ({mpn})"
-        )
+        bail!("PCBWay catalog cannot be queried: the public partner API has no part search ({mpn})")
     }
 }
 

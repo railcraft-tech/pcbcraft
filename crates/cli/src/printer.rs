@@ -1,14 +1,9 @@
 //! PHPUnit-style test output.
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::time::Duration;
 
 use pcbcraft_application::ports::{SuiteHeader, TestLine, TestPrinter, TestStatus};
-
-pub fn stdout_printer() -> ConsolePrinter<std::io::Stdout> {
-    let color = std::io::stdout().is_terminal();
-    ConsolePrinter::new(std::io::stdout(), color)
-}
 
 pub struct ConsolePrinter<W> {
     out: W,

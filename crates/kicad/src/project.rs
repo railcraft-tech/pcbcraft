@@ -8,6 +8,43 @@ pub fn resolve(
     schematic: Option<&Path>,
     board: Option<&Path>,
 ) -> Result<Project> {
+    let base = std::env::current_dir().context("current directory")?;
+    resolve_in(&base, input, schematic, board)
+}
+
+/// Resolve a project using `base` when no input file is given.
+/// Relative paths are joined onto `base`. This does not change the process directory.
+pub fn resolve_in(
+    base: &Path,
+    input: Option<&Path>,
+    schematic: Option<&Path>,
+    board: Option<&Path>,
+) -> Result<Project> {
+    let input = input.map(|path| join_base(base, path));
+    let schematic = schematic.map(|path| join_base(base, path));
+    let board = board.map(|path| join_base(base, path));
+    resolve_anchored(
+        base,
+        input.as_deref(),
+        schematic.as_deref(),
+        board.as_deref(),
+    )
+}
+
+fn join_base(base: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
+fn resolve_anchored(
+    base: &Path,
+    input: Option<&Path>,
+    schematic: Option<&Path>,
+    board: Option<&Path>,
+) -> Result<Project> {
     if schematic.is_some() || board.is_some() {
         let directory = schematic
             .or(board)
@@ -27,7 +64,7 @@ pub fn resolve(
     }
     let input = match input {
         Some(path) => path.to_path_buf(),
-        None => only_project(&std::env::current_dir().context("current directory")?)?,
+        None => only_project(base)?,
     };
     if is_ext(&input, "kicad_pro") {
         let directory = parent_of(&input);

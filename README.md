@@ -17,6 +17,7 @@ pcbcraft parts alternatives spec.yaml
 pcbcraft components sync <project.kicad_pro>
 pcbcraft components show C12345
 pcbcraft net GND dump
+pcbcraft mcp
 ```
 
 `export bom` writes a JLCPCB-shaped bill of materials. `export pos` writes the raw KiCad position CSV. `export cpl` corrects rotation and offset, then writes the five JLCPCB columns. Run CPL on a fresh position file: a second pass mirrors the bottom again.
@@ -32,6 +33,8 @@ Further checks are separate JSON types and are not created by `tests init defaul
 `parts alternatives` searches LCSC or PCBWay from a YAML file. Each item sets `supplier`, and the parameters for one supplier are not accepted by the other. `components sync` stores the parts used on the schematic, including electrical parameters, in `.pcbcraft/components.sqlite3`. `components show C12345` prints that card as JSON.
 
 `net GND dump` prints track widths, a text graph, and the pin-to-pin list. The graph is cached in `.pcbcraft/net.sqlite` and rebuilt when a source file changes.
+
+`pcbcraft mcp` serves these commands over MCP. See [docs/MCP.md](docs/MCP.md).
 
 Set `KICAD_CLI` if `kicad-cli` is not on `PATH`.
 

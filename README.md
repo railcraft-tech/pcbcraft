@@ -1,8 +1,28 @@
 # pcbcraft
 
-Command-line helper for KiCad boards: manufacturing files, checks, supplier lookup, and net inspection. It talks to KiCad only through `kicad-cli` and does not rewrite schematic or board files.
+Tooling to speedup human & AI work on PCB design & PCB ordering. Use it by yourself with the CLI, or handover to AI with a MCP.
+
+With this tool AI can burn multiple times less tokens, as some part of PCB analysis and parts search is done by `pcbcraft`.
+You can ask e.g. `do I have space to put a second resistor next to R24?`, instead of AI analyzing your PCB geometry again it calls `pcbcraft geometry find-symbol R24` and `pcbcraft geometry is-occupied` and analyzing its output which is limited to nearby area with already computed values.
+
+Before the order you can ask if all components are accessible on the supplier side, to find a compatible replacement for given component.
+Connecting with GitHub Actions you can monitor components availability more frequently, e.g. weekly or on code push.
+
+**Core features:**
+- PCB unit tests with `pcbcraft tests run`
+- Alternative parts search, matching by min-max, and list of parameters
+- Fetching BOM from external APIs (e.g. JLCPCB/LCSC) for quick parameters inspection
+- NETs analysis
+- Finding components on the board, describing, taking pictures of single components
+- PCB geometry support, a complete PCB map rendered by `pcbcraft`, with collisions detection - `pcbcraft geometry is-occupied --x X --y Y` with showing also nearby space
+- Exporting to JLCPCB with correcting positions and rotations in CPL file (KiCad by default exports positions that are wrongly interpreted by JLCPCB and needs to be corrected). Partially the positions are corrected automatically, the rest you can adjust with a YAML file
+- Integrated MCP
+- JLCPCB DFM check made locally as part of a unit test to better prepare board for the order
+- CLI can be embedded as a GitHub Actions step for constantly checking your board for breaking changes, missing components on the supplier side
 
 ## Commands
+
+Here is an example list of commands accessible from the CLI.
 
 ```text
 pcbcraft export bom <project.kicad_pro>
@@ -12,6 +32,8 @@ pcbcraft export gerbers <project.kicad_pro> -o board.zip
 pcbcraft export drawing <project.kicad_pro>
 pcbcraft export 2d <project.kicad_pro> --symbol J1 --around-space 2mm
 pcbcraft geometry find-symbol J1
+pcbcraft geometry is-occupied
+pcbcraft geometry dump
 pcbcraft tests run
 pcbcraft parts alternatives spec.yaml
 pcbcraft components sync <project.kicad_pro>
@@ -20,31 +42,34 @@ pcbcraft net GND dump
 pcbcraft mcp
 ```
 
-`export bom` writes a JLCPCB-shaped bill of materials. `export pos` writes the raw KiCad position CSV. `export cpl` corrects rotation and offset, then writes the five JLCPCB columns. Run CPL on a fresh position file: a second pass mirrors the bottom again.
+## Cursor
 
-`export drawing` puts the front above the back on one landscape A4 page at 1:1. `--side side` or `--side back` selects one face. `--full` adds color.
+In the project, `.cursor/mcp.json`:
 
-`export 2d` writes a square PNG of the orthographic 3D view. `--side` is `front` or `back` and defaults to `front`. `--symbol J1` frames that footprint and picks the face from its geometry. `--around-space` defaults to 5 mm. `geometry find-symbol J1` prints the shapes of that one footprint.
-
-`tests run` reads `tests/pcbcraft/**/*.json`. Each file names a validator (`ERCValidator`, `DRCValidator`, or `PartAvailability`) and a `spec`. Pass another directory as `pcbcraft tests run <dir>`. `pcbcraft tests run --name erc-test` runs that one file and still runs its subtests. The name is the file path relative to the test directory, without `.json`. `pcbcraft tests init defaults` creates that directory, if it is missing, with `erc-test.json`, `drc-test.json`, and `availability-test.json`. The generated availability test sets `defaultMinimum` to 10. `pcbcraft tests init type ERCValidator my-check` writes `my-check.json` for that type. Both the type and the file name are required. `pcbcraft tests list` prints the tests in the directory, then the types the program can run. `pcbcraft.yaml` in the current directory can list lines to skip under `tests.skipped`, for example `VoltageRating.C21`. A skipped line is printed and does not fail the run.
-
-Further checks are separate JSON types and are not created by `tests init defaults`: `Attributes`, `CatalogValue`, `ResistorPower`, `VoltageRating`, `Divider`, `TimeConstant`, `ParallelPassives`, and `SeriesPassives`. `tests init type` can write them. `Attributes` requires a mounting hole or fiducial to stay out of the BOM and the position file, and to have no LCSC or PCBWay number. The electrical checks read the net graph and `.pcbcraft/components.sqlite3`. Rail voltages are declared in the test file as a min/max pair.
-
-`parts alternatives` searches LCSC or PCBWay from a YAML file. Each item sets `supplier`, and the parameters for one supplier are not accepted by the other. `components sync` stores the parts used on the schematic, including electrical parameters, in `.pcbcraft/components.sqlite3`. `components show C12345` prints that card as JSON.
-
-`net GND dump` prints track widths, a text graph, and the pin-to-pin list. The graph is cached in `.pcbcraft/net.sqlite` and rebuilt when a source file changes.
-
-`pcbcraft mcp` serves these commands over MCP. See [docs/MCP.md](docs/MCP.md).
-
-Set `KICAD_CLI` if `kicad-cli` is not on `PATH`.
-
-## Build and test
-
-```text
-make
-make test
+```json
+{
+  "mcpServers": {
+    "pcbcraft": {
+      "command": "pcbcraft",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
 
-`make` builds the workspace. `make test` runs the unit tests in every crate. Pushes and pull requests run the same tests in GitHub Actions. A tag `v*` also publishes release binaries for Linux (x86_64 and aarch64), macOS (aarch64), and Windows (x86_64).
+The same entry in `~/.cursor/mcp.json` enables the server for every project.
 
-A skill for agents that call this tool lives in `dist/.skills/pcbcraft`. Copy that directory into another project's `.cursor/skills/pcbcraft`.
+## Claude Code
+
+In the project, `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "pcbcraft": {
+      "command": "pcbcraft",
+      "args": ["mcp"]
+    }
+  }
+}
+```

@@ -1,15 +1,17 @@
 use pcbcraft_domain::geometry::{
-    point_blocked, ray_hits, BoardGeometry, GeometryError, Point, Shape, Window,
+    point_blocked, ray_hits, BoardGeometry, GeometryError, Point, Shape, Source, Window,
 };
 use serde_json::{json, Value};
 
-use super::dump::{dump_json, selected, DumpOptions};
+use super::dump::{clipped, dump_view, round_mm, view_json, DumpOptions, DumpView};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct OccupiedOptions {
     pub size: f64,
     pub detailed: bool,
     pub precision: f64,
+    /// Only shapes on these layers count. Board outline and drills always do.
+    pub layers: Option<Vec<String>>,
 }
 
 impl Default for OccupiedOptions {
@@ -18,6 +20,7 @@ impl Default for OccupiedOptions {
             size: 10.0,
             detailed: false,
             precision: 0.01,
+            layers: None,
         }
     }
 }
@@ -28,63 +31,87 @@ pub fn occupied_json(
     options: OccupiedOptions,
 ) -> Result<Value, GeometryError> {
     let window = Window::square(point.x, point.y, options.size);
-    let shapes = selected(board, Some(window), false);
-    let occupied = shapes.iter().any(|shape| point_blocked(shape, point));
+    if !options.size.is_finite() || options.size <= 0.0 {
+        return Err(GeometryError::BadLength(options.size.to_string()));
+    }
     let dump_options = DumpOptions {
         all: false,
         detailed: options.detailed,
         precision: options.precision,
     };
-    let nearby = dump_json(board, Some(window), dump_options)?;
+    let mut view = dump_view(board, Some(window), dump_options)?;
+    if let Some(layers) = &options.layers {
+        view.shapes.retain(|shape| {
+            matches!(shape.source, Source::Edge | Source::Hole) || layers.contains(&shape.layer)
+        });
+    }
+    // Only the window matters here, so big polygons are cut down to it first.
+    let owned = clipped(&view.shapes, window);
+    let shapes: Vec<&Shape> = owned.iter().collect();
+    let nearby = view_json(
+        &DumpView {
+            window: view.window,
+            shapes: shapes.clone(),
+        },
+        dump_options,
+    )?;
+    let shapes = &shapes;
+    let inside = shapes
+        .iter()
+        .copied()
+        .find(|shape| point_blocked(shape, point));
+    let occupied = inside.is_some();
     Ok(json!({
         "unit": "mm",
-        "point": { "x": point.x, "y": point.y },
+        "point": { "x": round_mm(point.x), "y": round_mm(point.y) },
         "window": nearby["window"].clone(),
         "occupied": occupied,
         "free": {
-            "left": direction_json(&shapes, point, window, Point::new(-1.0, 0.0)),
-            "right": direction_json(&shapes, point, window, Point::new(1.0, 0.0)),
-            "up": direction_json(&shapes, point, window, Point::new(0.0, 1.0)),
-            "down": direction_json(&shapes, point, window, Point::new(0.0, -1.0)),
+            "left": direction_json(shapes, inside, point, window, Point::new(-1.0, 0.0)),
+            "right": direction_json(shapes, inside, point, window, Point::new(1.0, 0.0)),
+            // Y grows downward in the board file, so screen "up" is -Y.
+            "up": direction_json(shapes, inside, point, window, Point::new(0.0, -1.0)),
+            "down": direction_json(shapes, inside, point, window, Point::new(0.0, 1.0)),
         },
-        "nearby": { "layers": nearby["layers"].clone() },
+        "nearby": { "clipped": true, "layers": nearby["layers"].clone() },
     }))
 }
 
-fn direction_json(shapes: &[&Shape], origin: Point, window: Window, direction: Point) -> Value {
+fn direction_json(
+    shapes: &[&Shape],
+    inside: Option<&Shape>,
+    origin: Point,
+    window: Window,
+    direction: Point,
+) -> Value {
     let step = 1e-4;
     let ahead = Point::new(origin.x + direction.x * step, origin.y + direction.y * step);
-    let inside = shapes.iter().any(|shape| point_blocked(shape, origin));
-    if inside && shapes.iter().any(|shape| point_blocked(shape, ahead)) {
-        let shape = shapes
-            .iter()
-            .copied()
-            .find(|shape| point_blocked(shape, origin));
-        return hit_json(0.0, false, shape);
+    if inside.is_some() && shapes.iter().any(|shape| point_blocked(shape, ahead)) {
+        return hit_json(0.0, false, inside);
     }
     let limit = window_limit(origin, direction, window);
     let mut best: Option<(f64, &Shape)> = None;
     for shape in shapes {
-        for t in ray_hits(&shape.clearance, origin, direction) {
+        let mut hits = ray_hits(&shape.clearance, origin, direction);
+        hits.sort_by(f64::total_cmp);
+        // Hits come nearest first, so the first that enters the shape is this shape's answer.
+        // Anything past the best distance so far cannot win, so each shape stops early.
+        for t in hits {
             if t <= step || t > limit + 1e-7 {
                 continue;
             }
-            let before = point_blocked(
-                shape,
+            if best.is_some_and(|(so_far, _)| t >= so_far) {
+                break;
+            }
+            let at = |offset: f64| {
                 Point::new(
-                    origin.x + direction.x * (t - step),
-                    origin.y + direction.y * (t - step),
-                ),
-            );
-            let after = point_blocked(
-                shape,
-                Point::new(
-                    origin.x + direction.x * (t + step),
-                    origin.y + direction.y * (t + step),
-                ),
-            );
-            if !before && after && best.map(|(so_far, _)| t < so_far).unwrap_or(true) {
+                    origin.x + direction.x * (t + offset),
+                    origin.y + direction.y * (t + offset),
+                )
+            };
+            if !point_blocked(shape, at(-step)) && point_blocked(shape, at(step)) {
                 best = Some((t, shape));
+                break;
             }
         }
     }
@@ -96,7 +123,7 @@ fn direction_json(shapes: &[&Shape], origin: Point, window: Window, direction: P
 
 fn hit_json(mm: f64, limited: bool, shape: Option<&Shape>) -> Value {
     let mut value = json!({
-        "mm": mm,
+        "mm": round_mm(mm),
         "limitedByWindow": limited,
     });
     if let Some(shape) = shape {

@@ -1,10 +1,11 @@
 use anyhow::{bail, Context, Result};
+use pcbcraft_domain::parts::parse_quantity;
 use pcbcraft_domain::parts::{
     lcsc_keyword, ElecParam, LcscQuery, PartRecord, Supplier, SupplierCatalog,
 };
-use pcbcraft_domain::parts::parse_quantity;
 
-const SEARCH: &str = "https://jlcpcb.com/api/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentList/v2";
+const SEARCH: &str =
+    "https://jlcpcb.com/api/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentList/v2";
 
 pub struct LcscCatalog {
     pub in_stock: bool,
@@ -44,7 +45,8 @@ impl SupplierCatalog for LcscCatalog {
     }
 
     fn search(&self, query: &LcscQuery) -> Result<Vec<PartRecord>> {
-        let mut body_records = search_raw(&lcsc_keyword(query), self.in_stock, self.basic_only, 50)?;
+        let mut body_records =
+            search_raw(&lcsc_keyword(query), self.in_stock, self.basic_only, 50)?;
         if !query.package.is_empty() {
             body_records.retain(|record| {
                 query.package.iter().any(|package| {
@@ -59,7 +61,12 @@ impl SupplierCatalog for LcscCatalog {
     }
 }
 
-fn search_raw(keyword: &str, in_stock: bool, basic_only: bool, limit: u32) -> Result<Vec<PartRecord>> {
+fn search_raw(
+    keyword: &str,
+    in_stock: bool,
+    basic_only: bool,
+    limit: u32,
+) -> Result<Vec<PartRecord>> {
     let mut body = serde_json::json!({
         "currentPage": 1,
         "pageSize": limit.min(50),
@@ -73,7 +80,10 @@ fn search_raw(keyword: &str, in_stock: bool, basic_only: bool, limit: u32) -> Re
         body["componentLibTypes"] = serde_json::json!(["base"]);
         body["preferredComponentFlag"] = serde_json::json!(true);
     }
-    if keyword.split_whitespace().any(|part| looks_like_package(part)) {
+    if keyword
+        .split_whitespace()
+        .any(|part| looks_like_package(part))
+    {
         let packages: Vec<&str> = keyword
             .split_whitespace()
             .filter(|part| looks_like_package(part))
@@ -151,13 +161,16 @@ fn record_from(value: &serde_json::Value) -> Option<PartRecord> {
         price: value
             .pointer("/componentPrices/0/productPrice")
             .and_then(|value| value.as_f64()),
-        library: value.get("componentLibraryType").and_then(|value| value.as_str()).map(|text| {
-            if text == "base" {
-                "basic".into()
-            } else {
-                "extended".into()
-            }
-        }),
+        library: value
+            .get("componentLibraryType")
+            .and_then(|value| value.as_str())
+            .map(|text| {
+                if text == "base" {
+                    "basic".into()
+                } else {
+                    "extended".into()
+                }
+            }),
         parameters,
     })
 }

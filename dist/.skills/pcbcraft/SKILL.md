@@ -10,7 +10,7 @@ description: >
 
 # pcbcraft
 
-Use the `pcbcraft` binary. Do not edit `.kicad_sch`, `.kicad_pcb`, or `.kicad_pro` to produce these outputs. Read numbers and violations from the command output.
+Use the `pcbcraft` binary. Do not edit `.kicad_sch`, `.kicad_pcb`, or `.kicad_pro` to produce these outputs. Read numbers and violations from the command output. MCP tools from `pcbcraft mcp` are the same commands. Each one requires `cwd`, an absolute project directory.
 
 ## Export
 

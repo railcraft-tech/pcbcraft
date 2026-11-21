@@ -10,8 +10,11 @@ use pcbcraft_application::geometry::{
 };
 use pcbcraft_domain::geometry::{parse_window, GeometryError, Point};
 use pcbcraft_kicad::geometry::{load_cached, read_clearance_rules};
-use pcbcraft_kicad::project::{require_file, resolve};
+use pcbcraft_kicad::project::{require_file, resolve_in};
 use pcbcraft_render::geometry_png;
+use serde::Deserialize;
+
+use crate::commands::output::{place, CommandOutput};
 
 #[derive(Subcommand)]
 pub enum GeometryKind {
@@ -23,112 +26,159 @@ pub enum GeometryKind {
     FindSymbol(FindSymbolArgs),
 }
 
-#[derive(Args)]
+fn default_precision() -> f64 {
+    0.01
+}
+
+fn default_format() -> String {
+    "json".into()
+}
+
+fn default_size() -> f64 {
+    10.0
+}
+
+#[derive(Args, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DumpArgs {
     /// Window `XMIN-XMAXxYMIN-YMAX`, for example `0-50x0-40`. Omit it to dump the whole board.
+    #[serde(default)]
     window: Option<String>,
     /// Include silk, fab, mask, paste, and text.
     #[arg(long)]
+    #[serde(default)]
     all: bool,
     /// Add a sampled `points` list beside each outline.
     #[arg(long)]
+    #[serde(default)]
     detailed: bool,
     /// Sampling step in millimetres for `--detailed`.
     #[arg(long, default_value_t = 0.01)]
+    #[serde(default = "default_precision")]
     detailed_precision: f64,
     /// `json` prints the outlines. `png` draws them.
     #[arg(long, value_parser = ["json", "png"], default_value = "json")]
+    #[serde(default = "default_format")]
     format: String,
     /// Output file. JSON defaults to stdout. PNG defaults to pcb-geometry.png.
     #[arg(long)]
+    #[serde(default)]
     output: Option<PathBuf>,
     #[arg(long)]
+    #[serde(default)]
     board: Option<PathBuf>,
     /// A .kicad_pro, .kicad_sch, or .kicad_pcb file.
+    #[serde(default)]
     input: Option<PathBuf>,
 }
 
-#[derive(Args)]
+#[derive(Args, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OccupiedArgs {
-    #[arg(long)]
+    #[arg(long, allow_negative_numbers = true)]
     x: f64,
-    #[arg(long)]
+    #[arg(long, allow_negative_numbers = true)]
     y: f64,
     /// Side of the square around the point, in millimetres.
     #[arg(long, default_value_t = 10.0)]
+    #[serde(default = "default_size")]
     size: f64,
     #[arg(long)]
+    #[serde(default)]
     detailed: bool,
     #[arg(long, default_value_t = 0.01)]
+    #[serde(default = "default_precision")]
     detailed_precision: f64,
+    /// Comma-separated layers that count, for example `F.Cu` or `F.Cu,F.CrtYd`.
+    /// Edge.Cuts and drills always count. Omit it to count every layer.
+    #[arg(long, value_delimiter = ',')]
+    #[serde(default)]
+    layer: Option<Vec<String>>,
     #[arg(long)]
+    #[serde(default)]
     board: Option<PathBuf>,
     /// A .kicad_pro, .kicad_sch, or .kicad_pcb file.
+    #[serde(default)]
     input: Option<PathBuf>,
 }
 
-#[derive(Args)]
+#[derive(Args, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FindSymbolArgs {
     /// Footprint reference, for example U1.
     reference: String,
     #[arg(long)]
+    #[serde(default)]
     board: Option<PathBuf>,
     /// A .kicad_pro, .kicad_sch, or .kicad_pcb file.
+    #[serde(default)]
     input: Option<PathBuf>,
 }
 
-pub fn run(kind: GeometryKind) -> Result<()> {
-    let value = match kind {
+pub fn run(cwd: &Path, kind: GeometryKind) -> CommandOutput {
+    CommandOutput::from_result(execute(cwd, kind))
+}
+
+fn execute(cwd: &Path, kind: GeometryKind) -> Result<CommandOutput> {
+    match kind {
         GeometryKind::Dump(args) => {
             let format = args.format.clone();
             let output = args.output.clone();
-            let (window, input) = dump_target(args.window, args.input)?;
-            let board = load(&input, args.board.as_deref())?;
+            let (window, input) = dump_target(cwd, args.window, args.input)?;
+            let board = load(cwd, &input, args.board.as_deref())?;
             let options = DumpOptions {
                 all: args.all,
                 detailed: args.detailed,
                 precision: args.detailed_precision,
             };
-            return write_dump(&board, window, options, &format, output.as_deref());
+            write_dump(cwd, &board, window, options, &format, output.as_deref())
         }
         GeometryKind::IsOccupied(args) => {
-            if args.size <= 0.0 {
+            if !args.size.is_finite() || args.size <= 0.0 {
                 bail!("size must be positive");
             }
-            let board = load(&args.input, args.board.as_deref())?;
-            occupied_json(
+            let board = load(cwd, &args.input, args.board.as_deref())?;
+            let value = occupied_json(
                 &board,
                 Point::new(args.x, args.y),
                 OccupiedOptions {
                     size: args.size,
                     detailed: args.detailed,
                     precision: args.detailed_precision,
+                    layers: args.layer,
                 },
             )
-            .map_err(anyhow_geometry)?
+            .map_err(anyhow_geometry)?;
+            Ok(CommandOutput::text(format!(
+                "{}\n",
+                serde_json::to_string_pretty(&value)?
+            )))
         }
         GeometryKind::FindSymbol(args) => {
-            let board = load(&args.input, args.board.as_deref())?;
-            find_symbol(&board, &args.reference).map_err(anyhow_geometry)?
+            let board = load(cwd, &args.input, args.board.as_deref())?;
+            let value = find_symbol(&board, &args.reference).map_err(anyhow_geometry)?;
+            Ok(CommandOutput::text(format!(
+                "{}\n",
+                serde_json::to_string_pretty(&value)?
+            )))
         }
-    };
-    println!("{}", serde_json::to_string_pretty(&value)?);
-    Ok(())
+    }
 }
 
 fn write_dump(
+    cwd: &Path,
     board: &pcbcraft_domain::geometry::BoardGeometry,
     window: Option<pcbcraft_domain::geometry::Window>,
     options: DumpOptions,
     format: &str,
     output: Option<&Path>,
-) -> Result<()> {
+) -> Result<CommandOutput> {
     let view = dump_view(board, window, options).map_err(anyhow_geometry)?;
     match format {
         "png" => {
             let path = match dump_destination(format, output)? {
                 DumpDestination::Stdout => bail!("png output cannot be stdout"),
-                DumpDestination::File(path) => path,
+                DumpDestination::File(path) => place(cwd, &path),
             };
             let bytes = geometry_png(
                 &view.shapes,
@@ -137,21 +187,21 @@ fn write_dump(
                 options.precision,
             )?;
             write_bytes(&path, &bytes)?;
-            eprintln!("Wrote {}", path.display());
+            Ok(CommandOutput::note(format!("Wrote {}\n", path.display())))
         }
         _ => {
             let value = dump_json(board, window, options).map_err(anyhow_geometry)?;
             let text = serde_json::to_string_pretty(&value)?;
             match dump_destination(format, output)? {
-                DumpDestination::Stdout => println!("{text}"),
+                DumpDestination::Stdout => Ok(CommandOutput::text(format!("{text}\n"))),
                 DumpDestination::File(path) => {
+                    let path = place(cwd, &path);
                     write_bytes(&path, text.as_bytes())?;
-                    eprintln!("Wrote {}", path.display());
+                    Ok(CommandOutput::note(format!("Wrote {}\n", path.display())))
                 }
             }
         }
     }
-    Ok(())
 }
 
 enum DumpDestination {
@@ -182,6 +232,7 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn dump_target(
+    cwd: &Path,
     window: Option<String>,
     input: Option<PathBuf>,
 ) -> Result<(Option<pcbcraft_domain::geometry::Window>, Option<PathBuf>)> {
@@ -190,33 +241,35 @@ fn dump_target(
     };
     match parse_window(&text) {
         Ok(window) => Ok((Some(window), input)),
-        Err(_) if input.is_none() && looks_like_project(&text) => {
+        Err(_) if input.is_none() && looks_like_project(cwd, &text) => {
             Ok((None, Some(PathBuf::from(text))))
         }
         Err(err) => Err(anyhow_window(err)),
     }
 }
 
-fn looks_like_project(text: &str) -> bool {
+fn looks_like_project(cwd: &Path, text: &str) -> bool {
     let path = Path::new(text);
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| matches!(ext, "kicad_pcb" | "kicad_pro" | "kicad_sch"))
-        || path.exists()
+        || place(cwd, path).exists()
 }
 
 pub fn load_geometry(
+    cwd: &Path,
     input: Option<&Path>,
     board: Option<&Path>,
 ) -> Result<pcbcraft_domain::geometry::BoardGeometry> {
-    load(&input.map(Path::to_path_buf), board)
+    load(cwd, &input.map(Path::to_path_buf), board)
 }
 
 fn load(
+    cwd: &Path,
     input: &Option<PathBuf>,
     board: Option<&Path>,
 ) -> Result<pcbcraft_domain::geometry::BoardGeometry> {
-    let project = resolve(input.as_deref(), None, board)?;
+    let project = resolve_in(cwd, input.as_deref(), None, board)?;
     let board_path = project.board.clone().context("project has no board")?;
     require_file(&board_path, "board")?;
     let pro = project_file(&project, &board_path)?;

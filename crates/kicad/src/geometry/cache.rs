@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use super::binary::{decode, encode};
 use super::parse_board;
 
-/// Load the whole board from `.pcbcraft`, rebuilding when the pcb file hash differs.
+/// Load the whole board from `.pcbcraft/geometry`, rebuilding when the pcb file hash differs.
 pub fn load_cached(
     cache_dir: &Path,
     board_path: &Path,
@@ -18,7 +18,7 @@ pub fn load_cached(
 ) -> Result<BoardGeometry> {
     let name = cache_name(board_path);
     let cache_path = cache_dir.join("geometry").join(format!("{name}.bin"));
-    let hash_path = cache_dir.join(format!("{name}-hash"));
+    let hash_path = cache_dir.join("geometry").join(format!("{name}-hash"));
     let hash = file_hash(board_path, rules)?;
     if let Some(geometry) = read_fresh(&cache_path, &hash_path, &hash)? {
         return Ok(geometry);
@@ -81,8 +81,14 @@ fn write_cache(
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
     }
-    // Older versions kept the cache as JSON next to it.
+    // Older versions kept a JSON cache, and its hash one directory up.
     let _ = fs::remove_file(cache_path.with_extension("json"));
+    if let (Some(dir), Some(name)) = (
+        hash_path.parent().and_then(Path::parent),
+        hash_path.file_name(),
+    ) {
+        let _ = fs::remove_file(dir.join(name));
+    }
     write_new(cache_path, &encode(geometry))?;
     write_new(hash_path, format!("{hash}\n").as_bytes())?;
     Ok(())
@@ -160,7 +166,7 @@ mod tests {
         let name = cache_name(&board);
         assert_eq!(name, "My-Board.kicad_pcb");
         let cache_path = cache.join("geometry").join(format!("{name}.bin"));
-        let hash_path = cache.join(format!("{name}-hash"));
+        let hash_path = cache.join("geometry").join(format!("{name}-hash"));
         assert!(cache_path.is_file());
         let stored_hash = fs::read_to_string(&hash_path).unwrap();
         assert_eq!(stored_hash.trim(), file_hash(&board, &rules()).unwrap());

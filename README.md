@@ -1,5 +1,9 @@
 # pcbcraft
 
+<p align="center">
+  <img src="docs/pcbcraft.png" alt="pcbcraft" width="200">
+</p>
+
 Tooling to speedup human & AI work on PCB design & PCB ordering. Use it by yourself with the CLI, or handover to AI with a MCP.
 
 With this tool AI can burn multiple times less tokens, as some part of PCB analysis and parts search is done by `pcbcraft`.
@@ -19,6 +23,7 @@ Connecting with GitHub Actions you can monitor components availability more freq
 - Integrated MCP
 - JLCPCB DFM check made locally as part of a unit test to better prepare board for the order
 - CLI can be embedded as a GitHub Actions step for constantly checking your board for breaking changes, missing components on the supplier side
+- A4 2D 1:1 printing for physical THT components placement check (`pcbcraft export drawing`)
 
 ## Commands
 
@@ -73,3 +78,14 @@ In the project, `.mcp.json`:
   }
 }
 ```
+
+## Notice
+
+This project has no any connections with JLCPCB, PCBWay or LCSC, it cannot be considered as affiliated or official.
+The integrations are made using public API as part of an Open Source project.
+
+This is an Open Source project, it cannot guarantee you anything. We do our best in our spare time.
+
+## License
+
+pcbcraft is released under the [GNU General Public License v3.0](LICENSE.md).

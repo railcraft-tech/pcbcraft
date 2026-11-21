@@ -8,7 +8,16 @@ pub fn render(records: &[PartRecord]) -> anyhow::Result<String> {
         [one] => record_json(one),
         many => Value::Array(many.iter().map(record_json).collect()),
     };
-    let mut text = serde_json::to_string_pretty(&value)?;
+    pretty(&value)
+}
+
+/// Search results are always an array, including when one part matched.
+pub fn render_list(records: &[PartRecord]) -> anyhow::Result<String> {
+    pretty(&Value::Array(records.iter().map(record_json).collect()))
+}
+
+fn pretty(value: &Value) -> anyhow::Result<String> {
+    let mut text = serde_json::to_string_pretty(value)?;
     text.push('\n');
     Ok(text)
 }

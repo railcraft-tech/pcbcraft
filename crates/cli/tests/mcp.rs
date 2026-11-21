@@ -44,6 +44,7 @@ fn the_server_lists_every_command_and_rejects_an_empty_test_directory() {
         "tests_init_defaults",
         "tests_init_type",
         "parts_alternatives",
+        "parts_search",
         "components_sync",
         "components_show",
         "net_dump",

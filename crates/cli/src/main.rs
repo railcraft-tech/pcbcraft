@@ -1,13 +1,13 @@
 //! pcbcraft — exports, checks, and part lookup for KiCad boards.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::commands::args::{
     type_list_help, AltArgs, CplArgs, DrawingArgs, FileArgs, InitTypeArgs, NetDumpArgs, RunArgs,
-    ShowArgs, SyncArgs, TestsDir, TwoDArgs,
+    SearchArgs, ShowArgs, SyncArgs, TestsDir, TwoDArgs,
 };
 use crate::commands::output::CommandOutput;
 
@@ -88,6 +88,8 @@ enum ExportKind {
 enum PartsKind {
     /// Alternatives from a YAML spec.
     Alternatives(AltArgs),
+    /// Search the JLCPCB assembly catalog.
+    Search(SearchArgs),
 }
 
 #[derive(Subcommand)]
@@ -166,6 +168,17 @@ fn run() -> Result<()> {
         },
         Command::Parts { kind } => match kind {
             PartsKind::Alternatives(args) => emit(commands::parts::alternatives(&cwd, &args)),
+            PartsKind::Search(mut args) => {
+                let piped = if io::stdin().is_terminal() {
+                    None
+                } else {
+                    let mut text = String::new();
+                    io::stdin().read_to_string(&mut text)?;
+                    Some(text)
+                };
+                commands::parts::read_piped_attributes(&mut args, piped)?;
+                emit(commands::parts::search(&cwd, &args))
+            }
         },
         Command::Components { kind } => match kind {
             ComponentsKind::Sync(args) => emit(commands::components::sync(&cwd, &args)),
@@ -196,7 +209,7 @@ fn emit(output: CommandOutput) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
     use pcbcraft_application::validate::known_types;
 
     #[test]
@@ -220,5 +233,40 @@ mod tests {
         assert_eq!(args.side, "front");
         assert_eq!(args.width, 1024);
         assert!(args.symbol.is_none());
+    }
+
+    #[test]
+    fn parts_search_reads_a_query_params_and_attribute_flags() {
+        use std::path::PathBuf;
+
+        let cli = super::Cli::try_parse_from([
+            "pcbcraft",
+            "parts",
+            "search",
+            "--supplier",
+            "jlcpcb",
+            "--query",
+            "resistor",
+            "-p",
+            "package=0805",
+            "-p",
+            "Resistance=10kΩ",
+            "--limit",
+            "2",
+            "params.json",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Command::Parts {
+                kind: super::PartsKind::Search(args),
+            } => {
+                assert_eq!(args.supplier, "jlcpcb");
+                assert_eq!(args.query, "resistor");
+                assert_eq!(args.param, vec!["package=0805", "Resistance=10kΩ"]);
+                assert_eq!(args.limit, 2);
+                assert_eq!(args.params, Some(PathBuf::from("params.json")));
+            }
+            _ => panic!("expected parts search"),
+        }
     }
 }

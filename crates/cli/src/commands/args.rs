@@ -7,6 +7,7 @@ use clap::builder::PossibleValuesParser;
 use clap::Args;
 use pcbcraft_application::validate::known_types;
 use serde::Deserialize;
+use serde_json::Value;
 
 fn default_side() -> String {
     "front".into()
@@ -187,6 +188,43 @@ pub struct AltArgs {
     #[arg(long, value_parser = ["text", "yaml"])]
     #[serde(default)]
     pub format: Option<String>,
+}
+
+#[derive(Debug, Args, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchArgs {
+    /// `jlcpcb` searches the JLCPCB assembly catalog.
+    #[arg(long)]
+    pub supplier: String,
+    /// Keyword sent to the catalog.
+    #[arg(long)]
+    pub query: String,
+    /// JSON file of product attributes. When omitted, a non-empty pipe is read instead.
+    #[arg(value_name = "ATTRIBUTES.json")]
+    #[serde(default)]
+    pub params: Option<PathBuf>,
+    /// Product attribute as `key=value`. Repeat to add more. The same key is OR.
+    #[arg(short = 'p', long = "param", value_name = "KEY=VALUE")]
+    #[serde(default)]
+    pub param: Vec<String>,
+    /// Product attributes. Each value is a string or a list of strings.
+    #[arg(skip)]
+    #[serde(default)]
+    pub attributes: Option<Value>,
+    #[arg(skip)]
+    #[serde(skip)]
+    pub stdin_json: Option<String>,
+    #[arg(long, default_value_t = 10)]
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    /// Keep parts with no stock.
+    #[arg(long)]
+    #[serde(default)]
+    pub include_out_of_stock: bool,
+    /// Basic parts only.
+    #[arg(long)]
+    #[serde(default)]
+    pub basic: bool,
 }
 
 #[derive(Debug, Args, Deserialize, Default)]

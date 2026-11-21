@@ -169,6 +169,37 @@ fn registry() -> Vec<Tool> {
             call: parts_alternatives,
         },
         Tool {
+            name: "parts_search",
+            description: "Search the JLCPCB assembly catalog by keyword and product attributes. Results are JSON.",
+            input_schema: schema(
+                json!({
+                    "supplier": {"type": "string", "description": "jlcpcb"},
+                    "query": {"type": "string", "description": "Keyword, for example resistor or STM32F103C8T6."},
+                    "params": {"type": "string", "description": "JSON file of product attributes. Relative paths are resolved from cwd. The same object as attributes."},
+                    "param": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Attributes as key=value, for example [\"Resistance=10kΩ\"]. Repeat a key to OR those values."
+                    },
+                    "attributes": {
+                        "type": "object",
+                        "description": "Product attributes. Each value is a string or a list of strings. package and manufacturer filter those fields. Any other key is a catalog attribute in the catalog's own spelling, for example {\"Resistance\":\"10kΩ\",\"Tolerance\":\"±1%\"}. A list is OR. Different keys are AND.",
+                        "additionalProperties": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}}
+                            ]
+                        }
+                    },
+                    "limit": {"type": "integer", "description": "Maximum hits. Defaults to 10. At most 50."},
+                    "include_out_of_stock": {"type": "boolean"},
+                    "basic": {"type": "boolean", "description": "Basic parts only."}
+                }),
+                &["supplier", "query"],
+            ),
+            call: parts_search,
+        },
+        Tool {
             name: "components_sync",
             description: "Fetch LCSC and PCBWay cards for parts on the schematic.",
             input_schema: schema(
@@ -314,6 +345,12 @@ fn parts_alternatives(value: &Value) -> CommandOutput {
     })
 }
 
+fn parts_search(value: &Value) -> CommandOutput {
+    invoke(value, |cwd, args: args::SearchArgs| {
+        parts::search(cwd, &args)
+    })
+}
+
 fn components_sync(value: &Value) -> CommandOutput {
     invoke(value, |cwd, args: args::SyncArgs| {
         components::sync(cwd, &args)
@@ -415,6 +452,7 @@ mod tests {
     fn every_tool_has_a_description_and_tests_run_rejects_an_empty_directory() {
         let tools = tools();
         assert!(tools.iter().any(|tool| tool.name == "tests_run"));
+        assert!(tools.iter().any(|tool| tool.name == "parts_search"));
         assert!(tools.iter().all(|tool| tool.name != "mcp"));
         for tool in tools {
             assert!(
@@ -459,6 +497,30 @@ mod tests {
             "nope": true
         }));
         assert_eq!(unknown.code, 2, "{}", unknown.stderr);
+
+        let search = tools
+            .iter()
+            .find(|tool| tool.name == "parts_search")
+            .unwrap();
+        let bad_supplier = (search.call)(&json!({
+            "cwd": dir.display().to_string(),
+            "supplier": "pcbway",
+            "query": "resistor"
+        }));
+        assert_eq!(bad_supplier.code, 1, "{}", bad_supplier.stderr);
+        assert!(
+            bad_supplier.stderr.contains("jlcpcb"),
+            "{}",
+            bad_supplier.stderr
+        );
+        let bare = (search.call)(&json!({
+            "cwd": dir.display().to_string(),
+            "supplier": "jlcpcb",
+            "query": "resistor",
+            "attributes": {"Resistance": 10000}
+        }));
+        assert_eq!(bare.code, 1, "{}", bare.stderr);
+        assert!(bare.stderr.contains("bare number"), "{}", bare.stderr);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

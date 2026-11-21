@@ -15,6 +15,7 @@ Connecting with GitHub Actions you can monitor components availability more freq
 **Core features:**
 - PCB unit tests with `pcbcraft tests run`
 - Alternative parts search, matching by min-max, and list of parameters
+- JLCPCB catalog search by keyword and product attributes (`pcbcraft parts search`)
 - Fetching BOM from external APIs (e.g. JLCPCB/LCSC) for quick parameters inspection
 - NETs analysis
 - Finding components on the board, describing, taking pictures of single components
@@ -41,6 +42,7 @@ pcbcraft geometry is-occupied
 pcbcraft geometry dump
 pcbcraft tests run
 pcbcraft parts alternatives spec.yaml
+pcbcraft parts search --supplier jlcpcb --query resistor -p package=0805 -p Resistance=10kΩ
 pcbcraft components sync <project.kicad_pro>
 pcbcraft components show C12345
 pcbcraft net GND dump

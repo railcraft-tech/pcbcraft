@@ -24,6 +24,8 @@ Ask for a free spot for a part or a track. The model calls `geometry_find_symbol
 
 Ask for a substitute. The model calls `parts_alternatives` with a spec. See [Parts](parts.md). After `components_sync`, `components_show` prints one catalog card already on the board, including its parameters.
 
+Ask for a part in the JLCPCB catalog. The model calls `parts_search` with `supplier` set to `jlcpcb`, a `query`, and `attributes` such as `{"package":"0805","Resistance":"10kΩ"}`. Values use the catalog spelling.
+
 ### BOM
 
 Ask what the board orders. `export_bom` is the JLCPCB bill. `components_show C12345` is printing information stored locally about the component without having to all the time ping the external API.

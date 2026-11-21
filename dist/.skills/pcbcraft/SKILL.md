@@ -2,10 +2,10 @@
 name: pcbcraft
 description: >
   Runs the pcbcraft CLI for KiCad board exports, JLCPCB CPL, Gerbers,
-  A4 drawings, ERC/DRC tests, LCSC and PCBWay alternatives, the project
-  component database, and net dumps. Use when the user mentions BOM, CPL,
-  Gerbers, JLCPCB, PCBWay, a board drawing, ERC, DRC, a part alternative,
-  a net, or a pin dump.
+  A4 drawings, ERC/DRC tests, LCSC and PCBWay alternatives, JLCPCB catalog
+  search, the project component database, and net dumps. Use when the user
+  mentions BOM, CPL, Gerbers, JLCPCB, PCBWay, a board drawing, ERC, DRC,
+  a part alternative, a part search, a net, or a pin dump.
 ---
 
 # pcbcraft
@@ -54,6 +54,8 @@ Rails are objects with string `min` and `max`, both required, for example `"3.3V
 `supplier` is required on every item. LCSC parameters and PCBWay parameters are different structs. A key from one supplier is an error on the other. See `reference.md`.
 
 `pcbcraft parts alternatives spec.yaml`
+
+`pcbcraft parts search --supplier jlcpcb --query resistor` searches the JLCPCB assembly catalog and prints a JSON array of LCSC parts. Product attributes are a JSON object on stdin, a JSON file argument, or repeated `-p key=value`. `package` and `manufacturer` filter those fields. Any other key is a catalog attribute in the catalog's own spelling, for example `Resistance=10kΩ` and `Tolerance=±1%`. A list, or a repeated key, is OR. Different keys are AND. `--limit` defaults to 10 and is at most 50. The MCP tool is `parts_search`. Pass the object as `attributes` and the `-p` entries as `param`. There is no stdin on the tool.
 
 `pcbcraft components sync <project.kicad_pro>` writes used LCSC and PCBWay parts, including electrical parameters, to `.pcbcraft/components.sqlite3`. It uses the same supplier catalog as the alternative search. `--refresh` fetches every number again. `pcbcraft components show C12345` prints that card, including every stored attribute, as JSON.
 

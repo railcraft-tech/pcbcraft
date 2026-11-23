@@ -3,14 +3,22 @@ name: pcbcraft
 description: >
   Runs the pcbcraft CLI for KiCad board exports, JLCPCB CPL, Gerbers,
   A4 drawings, ERC/DRC tests, LCSC and PCBWay alternatives, JLCPCB catalog
-  search, the project component database, and net dumps. Use when the user
-  mentions BOM, CPL, Gerbers, JLCPCB, PCBWay, a board drawing, ERC, DRC,
-  a part alternative, a part search, a net, or a pin dump.
+  search, LCSC datasheets, the project component database, net dumps, and
+  KiCad board-setup profiles for JLCPCB, PCBWay, or a custom JSON file.
+  Use when the user mentions BOM, CPL, Gerbers, JLCPCB, PCBWay, a board
+  drawing, ERC, DRC, board setup, a fabrication profile, a part alternative,
+  a part search, a datasheet, a net, or a pin dump.
 ---
 
 # pcbcraft
 
-Use the `pcbcraft` binary. Do not edit `.kicad_sch`, `.kicad_pcb`, or `.kicad_pro` to produce these outputs. Read numbers and violations from the command output. MCP tools from `pcbcraft mcp` are the same commands. Each one requires `cwd`, an absolute project directory.
+Use the `pcbcraft` binary. Do not edit `.kicad_sch`, `.kicad_pcb`, or `.kicad_pro` to produce these outputs. `pcbcraft board setup` is the exception: it writes the project rules, `.kicad_dru`, and the solder-mask lines in the board setup, then reloads are required. Read numbers and violations from the command output. MCP tools from `pcbcraft mcp` are the same commands. Each one requires `cwd`, an absolute project directory.
+
+## Board setup
+
+`pcbcraft board setup jlcpcb [board.kicad_pro]` and `pcbcraft board setup pcbway` raise KiCad's design rules to that fabricator's floors. Values that are already tighter stay. `pcbcraft board setup custom profile.json` reads a JSON profile with the same fields; `tracks` is required and `name` may contain letters, digits, and a hyphen. `--mask` defaults to `green`. The MCP tool is `board_setup`. Pass `profile` as `jlcpcb`, `pcbway`, or `custom`, and pass `file` when the profile is `custom`.
+
+The command checks the written files with `kicad-cli`. If the board or the rules do not load, it restores the three files from its own backup. Reload the board afterwards. An open KiCad overwrites the files on save.
 
 ## Export
 
@@ -37,6 +45,8 @@ Use the `pcbcraft` binary. Do not edit `.kicad_sch`, `.kicad_pcb`, or `.kicad_pr
 
 `DRCValidator` uses the same `spec`. Paths are relative to the JSON file. Exit code 2 means the schema blocked the run. Exit code 1 means a test failed.
 
+`pcbcraft tests single-run ERCValidator` reads the spec object from stdin and does not write a file. `project` is relative to the current directory. The MCP tool is `tests_single_run`. Pass the object as `spec`. There is no stdin on the tool.
+
 These types are not created by `tests init defaults`. `tests init type` writes one of them. `Attributes` checks mounting holes and fiducials: `in_bom` and `in_pos_files` must be no, and the LCSC and PCBWay fields must be empty. Each one is its own file:
 
 - `CatalogValue` compares each `R`, `C`, and `L` value on the schematic with the LCSC card, inside the catalog tolerance.
@@ -56,6 +66,10 @@ Rails are objects with string `min` and `max`, both required, for example `"3.3V
 `pcbcraft parts alternatives spec.yaml`
 
 `pcbcraft parts search --supplier jlcpcb --query resistor` searches the JLCPCB assembly catalog and prints a JSON array of LCSC parts. Product attributes are a JSON object on stdin, a JSON file argument, or repeated `-p key=value`. `package` and `manufacturer` filter those fields. Any other key is a catalog attribute in the catalog's own spelling, for example `Resistance=10kΩ` and `Tolerance=±1%`. A list, or a repeated key, is OR. Different keys are AND. `--limit` defaults to 10 and is at most 50. The MCP tool is `parts_search`. Pass the object as `attributes` and the `-p` entries as `param`. There is no stdin on the tool.
+
+`pcbcraft parts download-model C2040` saves the EasyEDA footprint under `.pcbcraft/EasyEDA.pretty` and the STEP model, when EasyEDA has one, under `.pcbcraft/EasyEDA.3dshapes`. A missing model still saves the footprint. `--library` changes the parent directory. `--project board.kicad_pro` registers the library in that project's `fp-lib-table`. The MCP tool is `parts_download_model`, with `lcsc` as the list of numbers.
+
+`pcbcraft parts download-datasheet --supplier lcsc C55266 --output-dir=datasheets/C55266` writes `datasheet.md`, `datasheet.pdf`, figures under `images/`, and the other LCSC files under `extra/`. The markdown links figures as `images/…`. PyMuPDF 2.1 is enough (`pip install 'pymupdf==2.1'`). PyMuPDF 1.x needs `pymupdf4llm` older than 2 (`pip install 'pymupdf4llm<2'`). The MCP tool is `parts_download_datasheet`.
 
 `pcbcraft components sync <project.kicad_pro>` writes used LCSC and PCBWay parts, including electrical parameters, to `.pcbcraft/components.sqlite3`. It uses the same supplier catalog as the alternative search. `--refresh` fetches every number again. `pcbcraft components show C12345` prints that card, including every stored attribute, as JSON.
 

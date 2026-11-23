@@ -5,7 +5,9 @@
 pub mod config;
 pub mod cpl;
 pub mod drawing;
+pub mod easyeda;
 pub mod electrical;
+pub mod fab;
 pub mod geometry;
 pub mod net;
 pub mod parts;

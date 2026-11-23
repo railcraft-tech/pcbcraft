@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use anyhow::{bail, Context, Result};
+use pcbcraft_application::parts::{FileBody, FileKind, ProductCard, RemoteFile};
 use pcbcraft_domain::parts::parse_quantity;
 use pcbcraft_domain::parts::{
     lcsc_keyword, ElecParam, LcscQuery, PartRecord, ProductAttributes, Supplier, SupplierCatalog,
@@ -6,6 +9,7 @@ use pcbcraft_domain::parts::{
 
 const SEARCH: &str =
     "https://jlcpcb.com/api/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentList/v2";
+const DETAIL: &str = "https://wmsc.lcsc.com/ftps/wm/product/detail";
 
 pub struct LcscCatalog {
     pub in_stock: bool,
@@ -225,6 +229,235 @@ fn record_from(value: &serde_json::Value) -> Option<PartRecord> {
     })
 }
 
+/// Product photos, RoHS files, and EasyEDA drawings for one LCSC number.
+/// The datasheet URL is `ProductCard::datasheet_url`. `pdfLinkUrl` is ignored:
+/// on the live API it is either null or the same address as `pdfUrl`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LcscDatasheets;
+
+impl LcscDatasheets {
+    pub fn fetch_card(&self, lcsc: &str) -> Result<ProductCard> {
+        let url = format!("{DETAIL}?productCode={lcsc}");
+        let payload = super::http::get_json(&url).context("LCSC product detail")?;
+        product_card(lcsc, &payload)
+    }
+}
+
+impl pcbcraft_application::parts::DatasheetCatalog for LcscDatasheets {
+    fn card(&self, lcsc: &str) -> Result<ProductCard> {
+        self.fetch_card(lcsc)
+    }
+}
+
+impl pcbcraft_application::parts::FileFetch for LcscDatasheets {
+    fn get(&self, url: &str) -> Result<FileBody> {
+        let body = super::http::get_bytes(url, Duration::from_secs(120))?;
+        Ok(FileBody {
+            bytes: body.bytes,
+            content_type: body.content_type,
+        })
+    }
+}
+
+pub fn product_card(requested: &str, value: &serde_json::Value) -> Result<ProductCard> {
+    if value.get("code").and_then(json_code) != Some(200) {
+        let message = value
+            .get("msg")
+            .and_then(|item| item.as_str())
+            .or_else(|| value.get("message").and_then(|item| item.as_str()))
+            .filter(|text| !text.is_empty())
+            .unwrap_or("API error");
+        bail!("LCSC: {message}");
+    }
+    let Some(result) = value.get("result").filter(|item| item.is_object()) else {
+        bail!("LCSC has no part {requested}");
+    };
+    let lcsc = text_at(result, "productCode");
+    if lcsc.is_empty() {
+        bail!("LCSC has no part {requested}");
+    }
+    let datasheet_url = absolute_url(&text_at(result, "pdfUrl"));
+    if datasheet_url.is_empty() {
+        bail!("LCSC {lcsc} has no datasheet");
+    }
+    let mut extras = Vec::new();
+    if let Some(images) = result.get("productImages").and_then(|item| item.as_array()) {
+        for image in images {
+            let Some(raw) = image.as_str() else {
+                continue;
+            };
+            let url = absolute_url(raw);
+            if url.is_empty() {
+                continue;
+            }
+            let Some(name) = image_name(&url) else {
+                continue;
+            };
+            push_named(
+                &mut extras,
+                RemoteFile {
+                    name,
+                    url,
+                    kind: FileKind::Jpeg,
+                },
+            );
+        }
+    }
+    if let Some(certs) = result.get("rohsCertList").and_then(|item| item.as_array()) {
+        for cert in certs {
+            let url = absolute_url(&text_at(cert, "url"));
+            if url.is_empty() {
+                continue;
+            }
+            let code = sanitize_token(&text_at(cert, "fileCode"));
+            let code = if code.is_empty() {
+                "cert".to_string()
+            } else {
+                code
+            };
+            let (ext, kind) = match url_extension(&url).as_deref() {
+                Some("zip") => ("zip", FileKind::Zip),
+                _ => ("pdf", FileKind::Pdf),
+            };
+            push_named(
+                &mut extras,
+                RemoteFile {
+                    name: format!("rohs-{code}.{ext}"),
+                    url,
+                    kind,
+                },
+            );
+        }
+    }
+    if let Some(eda) = result.get("edaSvgInfo").filter(|item| item.is_object()) {
+        push_svg(&mut extras, "symbol.svg", &text_at(eda, "schSvg"));
+        push_svg(&mut extras, "footprint.svg", &text_at(eda, "pcbSvg"));
+    }
+    Ok(ProductCard {
+        lcsc,
+        mpn: text_at(result, "productModel"),
+        manufacturer: text_at(result, "brandNameEn"),
+        datasheet_url,
+        extras,
+    })
+}
+
+fn push_svg(extras: &mut Vec<RemoteFile>, name: &str, url: &str) {
+    let url = absolute_url(url);
+    if url.is_empty() {
+        return;
+    }
+    push_named(
+        extras,
+        RemoteFile {
+            name: name.to_string(),
+            url,
+            kind: FileKind::Svg,
+        },
+    );
+}
+
+fn push_named(extras: &mut Vec<RemoteFile>, mut file: RemoteFile) {
+    file.name = unique_name(extras, &file.name);
+    extras.push(file);
+}
+
+fn unique_name(files: &[RemoteFile], name: &str) -> String {
+    if files.iter().all(|have| have.name != name) {
+        return name.to_string();
+    }
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
+    let mut index = 2;
+    loop {
+        let candidate = if ext.is_empty() {
+            format!("{stem}-{index}")
+        } else {
+            format!("{stem}-{index}.{ext}")
+        };
+        if files.iter().all(|have| have.name != candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn image_name(url: &str) -> Option<String> {
+    let file = url_file_name(url)?.to_ascii_lowercase();
+    if file.contains("_blank") {
+        return None;
+    }
+    if file.contains("_front") {
+        return Some("front.jpg".into());
+    }
+    if file.contains("_back") {
+        return Some("back.jpg".into());
+    }
+    let name = sanitize_token(&url_file_name(url)?);
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn url_file_name(url: &str) -> Option<String> {
+    let path = url.split('?').next().unwrap_or(url);
+    let name = path.rsplit('/').next().unwrap_or("").trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+fn url_extension(url: &str) -> Option<String> {
+    let name = url_file_name(url)?;
+    let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    if ext.len() <= 5 && ext.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        Some(ext)
+    } else {
+        None
+    }
+}
+
+fn absolute_url(url: &str) -> String {
+    let url = url.trim();
+    if let Some(rest) = url.strip_prefix("//") {
+        format!("https://{rest}")
+    } else if url.starts_with("https://") || url.starts_with("http://") {
+        url.to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn sanitize_token(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn text_at(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn json_code(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +512,80 @@ mod tests {
         );
         assert!(body.get("componentSpecificationList").is_none());
         assert!(body.get("presaleType").is_none());
+    }
+
+    #[test]
+    fn a_product_detail_keeps_the_datasheet_and_the_other_files() {
+        let card = product_card("C55266", &sample_detail()).unwrap();
+        assert_eq!(card.lcsc, "C55266");
+        assert_eq!(card.mpn, "TPS2553DBVR");
+        assert_eq!(card.manufacturer, "TI");
+        assert_eq!(
+            card.datasheet_url,
+            "https://datasheet.lcsc.com/datasheet/pdf/abc.pdf?productCode=C55266"
+        );
+        let names: Vec<_> = card.extras.iter().map(|file| file.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "front.jpg",
+                "back.jpg",
+                "rohs-wj1.pdf",
+                "rohs-wj2.zip",
+                "symbol.svg",
+                "footprint.svg",
+            ]
+        );
+        assert!(card
+            .extras
+            .iter()
+            .any(|file| file.url == "https://image.easyeda.com/component_svgs/prod/sch.svg"));
+        assert!(card
+            .extras
+            .iter()
+            .any(|file| file.kind == FileKind::Zip && file.name == "rohs-wj2.zip"));
+        assert!(card.extras.iter().all(|file| !file.name.contains("blank")));
+    }
+
+    #[test]
+    fn a_missing_datasheet_and_a_missing_part_are_errors() {
+        let mut detail = sample_detail();
+        detail["result"]["pdfUrl"] = serde_json::json!("");
+        let err = product_card("C1", &detail).unwrap_err();
+        assert!(err.to_string().contains("no datasheet"), "{err}");
+
+        let err =
+            product_card("C1", &serde_json::json!({"code": 200, "result": null})).unwrap_err();
+        assert!(err.to_string().contains("no part"), "{err}");
+
+        let err =
+            product_card("C1", &serde_json::json!({"code": 500, "msg": "closed"})).unwrap_err();
+        assert!(err.to_string().contains("closed"), "{err}");
+    }
+
+    fn sample_detail() -> serde_json::Value {
+        serde_json::json!({
+            "code": 200,
+            "result": {
+                "productCode": "C55266",
+                "productModel": "TPS2553DBVR",
+                "brandNameEn": "TI",
+                "pdfUrl": "https://datasheet.lcsc.com/datasheet/pdf/abc.pdf?productCode=C55266",
+                "pdfLinkUrl": "https://datasheet.lcsc.com/datasheet/pdf/abc.pdf?productCode=C55266",
+                "productImages": [
+                    "https://assets.lcsc.com/images/lcsc/900x900/x_C55266_front.jpg",
+                    "https://assets.lcsc.com/images/lcsc/900x900/x_C55266_back.jpg",
+                    "https://assets.lcsc.com/images/lcsc/900x900/x_C55266_blank.jpg"
+                ],
+                "rohsCertList": [
+                    {"fileCode": "wj1", "fileName": "cert.pdf", "url": "https://datasheet.lcsc.com/certification/rohs/a.pdf"},
+                    {"fileCode": "wj2", "fileName": "cert.zip", "url": "https://datasheet.lcsc.com/certification/rohs/b.zip"}
+                ],
+                "edaSvgInfo": {
+                    "schSvg": "//image.easyeda.com/component_svgs/prod/sch.svg",
+                    "pcbSvg": "//image.easyeda.com/component_svgs/prod/pcb.svg?t=1"
+                }
+            }
+        })
     }
 }

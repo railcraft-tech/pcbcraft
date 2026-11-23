@@ -10,6 +10,7 @@ use crate::geometry_cmd::{DumpArgs, FindSymbolArgs, GeometryKind, OccupiedArgs};
 use self::output::CommandOutput;
 
 pub mod args;
+pub mod board;
 pub mod components;
 pub mod export;
 pub mod mcp;
@@ -42,6 +43,20 @@ fn registry() -> Vec<Tool> {
         "directory": {"type": "string", "description": "Directory of JSON files. Defaults to tests/pcbcraft."}
     });
     vec![
+        Tool {
+            name: "board_setup",
+            description: "Raise KiCad board rules to a JLCPCB, PCBWay, or custom JSON profile. Checks the files with kicad-cli and restores them if they do not load.",
+            input_schema: schema(
+                json!({
+                    "profile": {"type": "string", "enum": ["jlcpcb", "pcbway", "custom"], "description": "jlcpcb, pcbway, or custom."},
+                    "file": {"type": "string", "description": "JSON profile. Required when profile is custom."},
+                    "input": {"type": "string", "description": "A .kicad_pro, .kicad_sch, or .kicad_pcb file."},
+                    "mask": {"type": "string", "description": "Solder-mask color. Defaults to green."}
+                }),
+                &["profile"],
+            ),
+            call: board_setup,
+        },
         Tool {
             name: "export_bom",
             description: "Write a JLCPCB-shaped bill of materials.",
@@ -154,6 +169,22 @@ fn registry() -> Vec<Tool> {
             call: tests_init_type,
         },
         Tool {
+            name: "tests_single_run",
+            description: "Run one test type from a spec object. Does not write a file. Exit code 1 is a failure and 2 is a schema or setup error.",
+            input_schema: schema(
+                json!({
+                    "type_name": {"type": "string", "description": "Validator type, for example ERCValidator."},
+                    "spec": {
+                        "type": "object",
+                        "description": "Test spec. The same object a test file stores under spec. project is relative to cwd.",
+                        "additionalProperties": true
+                    }
+                }),
+                &["type_name", "spec"],
+            ),
+            call: tests_single_run,
+        },
+        Tool {
             name: "parts_alternatives",
             description: "Search supplier catalogs from a YAML spec.",
             input_schema: schema(
@@ -198,6 +229,42 @@ fn registry() -> Vec<Tool> {
                 &["supplier", "query"],
             ),
             call: parts_search,
+        },
+        Tool {
+            name: "parts_download_model",
+            description: "Download EasyEDA footprints and STEP models for LCSC numbers into a local KiCad library.",
+            input_schema: schema(
+                json!({
+                    "lcsc": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "LCSC numbers, for example [\"C2040\"]."
+                    },
+                    "library": {
+                        "type": "string",
+                        "description": "Directory that will contain EasyEDA.pretty and EasyEDA.3dshapes. Defaults to .pcbcraft under cwd."
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "KiCad project file. When set, its sibling fp-lib-table gains the EasyEDA library."
+                    }
+                }),
+                &["lcsc"],
+            ),
+            call: parts_download_model,
+        },
+        Tool {
+            name: "parts_download_datasheet",
+            description: "Download an LCSC datasheet and write it as markdown with local images.",
+            input_schema: schema(
+                json!({
+                    "supplier": {"type": "string", "description": "lcsc"},
+                    "part": {"type": "string", "description": "LCSC number, for example C55266."},
+                    "output_dir": {"type": "string", "description": "Directory for datasheet.md, datasheet.pdf, images, and extra. Relative paths are resolved from cwd."}
+                }),
+                &["supplier", "part", "output_dir"],
+            ),
+            call: parts_download_datasheet,
         },
         Tool {
             name: "components_sync",
@@ -287,6 +354,12 @@ fn registry() -> Vec<Tool> {
     ]
 }
 
+fn board_setup(value: &Value) -> CommandOutput {
+    invoke(value, |cwd, args: args::BoardSetupArgs| {
+        board::setup(&cwd, &args)
+    })
+}
+
 fn export_bom(value: &Value) -> CommandOutput {
     invoke(value, |cwd, args: args::FileArgs| export::bom(cwd, &args))
 }
@@ -339,6 +412,12 @@ fn tests_init_type(value: &Value) -> CommandOutput {
     })
 }
 
+fn tests_single_run(value: &Value) -> CommandOutput {
+    invoke(value, |cwd, args: args::SingleRunArgs| {
+        tests_cmd::single_run(cwd, &args, false)
+    })
+}
+
 fn parts_alternatives(value: &Value) -> CommandOutput {
     invoke(value, |cwd, args: args::AltArgs| {
         parts::alternatives(cwd, &args)
@@ -348,6 +427,18 @@ fn parts_alternatives(value: &Value) -> CommandOutput {
 fn parts_search(value: &Value) -> CommandOutput {
     invoke(value, |cwd, args: args::SearchArgs| {
         parts::search(cwd, &args)
+    })
+}
+
+fn parts_download_model(value: &Value) -> CommandOutput {
+    invoke(value, |cwd, args: args::DownloadArgs| {
+        parts::download(cwd, &args, false)
+    })
+}
+
+fn parts_download_datasheet(value: &Value) -> CommandOutput {
+    invoke(value, |cwd, args: args::DatasheetArgs| {
+        parts::download_datasheet(cwd, &args)
     })
 }
 
@@ -452,6 +543,7 @@ mod tests {
     fn every_tool_has_a_description_and_tests_run_rejects_an_empty_directory() {
         let tools = tools();
         assert!(tools.iter().any(|tool| tool.name == "tests_run"));
+        assert!(tools.iter().any(|tool| tool.name == "tests_single_run"));
         assert!(tools.iter().any(|tool| tool.name == "parts_search"));
         assert!(tools.iter().all(|tool| tool.name != "mcp"));
         for tool in tools {
@@ -521,6 +613,41 @@ mod tests {
         }));
         assert_eq!(bare.code, 1, "{}", bare.stderr);
         assert!(bare.stderr.contains("bare number"), "{}", bare.stderr);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tests_single_run_rejects_a_spec_without_a_project_and_writes_nothing() {
+        let tools = tools();
+        let single = tools
+            .iter()
+            .find(|tool| tool.name == "tests_single_run")
+            .unwrap();
+        let required = single.input_schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|item| item == "cwd"));
+        assert!(required.iter().any(|item| item == "type_name"));
+        assert!(required.iter().any(|item| item == "spec"));
+        assert_eq!(single.input_schema["additionalProperties"], false);
+
+        let dir = std::env::temp_dir().join(format!(
+            "pcbcraft-single-run-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = (single.call)(&json!({
+            "cwd": dir.display().to_string(),
+            "type_name": "ERCValidator",
+            "spec": {}
+        }));
+        assert_eq!(output.code, 2, "{}{}", output.stdout, output.stderr);
+        let text = format!("{}{}", output.stdout, output.stderr);
+        assert!(text.contains("ERCValidator"), "{text}");
+        assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

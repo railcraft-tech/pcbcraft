@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use pcbcraft_domain::fab::{self, Limits};
 use pcbcraft_domain::geometry::{
     boundary_gap, boundary_segments, contains, filled_separation, outline_window, BoardGeometry,
     FootprintName, Outline, PadForm, Point, Shape, Source, Window,
@@ -58,7 +59,7 @@ struct Site {
 
 pub fn evaluate(board: &BoardGeometry, spec: &Value) -> Result<Vec<Line>> {
     let spec: Spec = serde_json::from_value(spec.clone()).context("spec JLCPCBDFM")?;
-    Ok(report(board, &spec))
+    report(board, &spec)
 }
 
 impl ValidatorInterface for JLCPCBDFM {
@@ -88,36 +89,32 @@ impl ValidatorInterface for JLCPCBDFM {
         let board = ctx.boards.load(Path::new(&parsed.project))?;
         Ok(super::validator::ready_jobs(
             file_name,
-            report(&board, &parsed),
+            report(&board, &parsed)?,
         ))
     }
 }
 
-fn report(board: &BoardGeometry, spec: &Spec) -> Vec<Line> {
+fn floors(board: &BoardGeometry, spec: &Spec) -> Result<Limits> {
     let outer_oz = spec
         .outer_copper_oz
         .unwrap_or_else(|| ounces(board.outer_copper_mm, 1.0));
-    let inner_oz = spec
-        .inner_copper_oz
-        .unwrap_or_else(|| ounces(board.inner_copper_mm, 0.5));
-    let _inner_track_min = if inner_oz >= 1.5 { 0.15 } else { 0.09 };
-    let multilayer = board.copper_layers.len() >= 3;
-    let track_min = if outer_oz >= 1.5 { 0.15 } else { 0.09 };
-    let pad_track_min = if outer_oz >= 1.5 { 0.15 } else { 0.10 };
-    let mask_bridge = if outer_oz >= 1.5 {
-        0.20
-    } else if matches!(spec.mask_color.as_str(), "black" | "white") {
-        0.13
-    } else {
-        0.10
-    };
-    let (annular_min, annular_rec) = if !multilayer && outer_oz < 1.5 {
-        (0.18, Some(0.25))
-    } else if outer_oz >= 1.5 {
-        (0.254, None)
-    } else {
-        (0.15, Some(0.20))
-    };
+    let _inner_oz = spec.inner_copper_oz;
+    fab::limits(
+        &fab::jlcpcb(),
+        board.copper_layers.len().max(1) as u32,
+        outer_oz * 0.035,
+        &spec.mask_color,
+    )
+}
+
+fn report(board: &BoardGeometry, spec: &Spec) -> Result<Vec<Line>> {
+    let floors = floors(board, spec)?;
+    let track_min = floors.track_space_mm;
+    let pad_track_min = floors.smd_pad_to_track_mm.unwrap_or(track_min);
+    let mask_bridge = floors.mask_bridge_mm.unwrap_or(0.10);
+    let mask_trace = floors.mask_to_copper_mm.unwrap_or(0.09);
+    let annular_min = floors.annular_fail_mm.unwrap_or(0.15);
+    let annular_rec = floors.annular_warn_mm;
 
     let hits = copper_hits(board);
     let mut lines = Vec::new();
@@ -160,7 +157,7 @@ fn report(board: &BoardGeometry, spec: &Spec) -> Vec<Line> {
         |hit| !hit.same_net && hit.smd_to_smd && hit.distance >= CONTACT,
         |hit| hit.distance,
         Band {
-            fail_below: Some(0.15),
+            fail_below: Some(floors.smd_pad_spacing_mm.unwrap_or(0.15)),
             warn_below: None,
         },
         "SMD pad to SMD pad",
@@ -182,31 +179,66 @@ fn report(board: &BoardGeometry, spec: &Spec) -> Vec<Line> {
         |hit| !hit.same_net && hit.smd_to_track && hit.mask_gap >= CONTACT,
         |hit| hit.mask_gap,
         Band {
-            fail_below: Some(0.09),
+            fail_below: Some(mask_trace),
             warn_below: None,
         },
         "solder-mask opening to trace",
     ));
 
     lines.push(annular_line(board, annular_min, annular_rec));
-    lines.push(via_diameter_line(board));
-    lines.push(hole_size_line(board));
-    lines.extend(hole_copper_lines(board));
-    lines.push(copper_edge_line(board));
-    lines.push(npth_diameter_line(board));
-    lines.push(npth_annular_line(board));
-    lines.push(slot_line(board, true));
-    lines.push(slot_line(board, false));
-    lines.push(hole_spacing_line(board, true));
-    lines.push(hole_spacing_line(board, false));
-    lines.push(silk_width_line(board));
-    lines.push(silk_height_line(board));
-    lines.push(silk_pad_line(board));
+    lines.push(via_diameter_line(
+        board,
+        floors.via_extra_fail_mm.unwrap_or(0.10),
+        floors.via_extra_warn_mm.or(Some(0.15)),
+    ));
+    lines.push(hole_size_line(
+        board,
+        floors.pth_drill_fail_mm.unwrap_or(0.15),
+        floors.via_drill_warn_mm,
+    ));
+    lines.extend(hole_copper_lines(board, &floors));
+    lines.push(copper_edge_line(
+        board,
+        floors.copper_to_edge_mm.unwrap_or(0.20),
+    ));
+    lines.push(npth_diameter_line(
+        board,
+        floors.npth_drill_fail_mm.unwrap_or(0.50),
+    ));
+    lines.push(npth_annular_line(
+        board,
+        floors.npth_annular_warn_mm.unwrap_or(0.45),
+    ));
+    lines.push(slot_line(
+        board,
+        true,
+        floors.plated_slot_mm.unwrap_or(0.50),
+    ));
+    lines.push(slot_line(board, false, floors.npth_slot_mm.unwrap_or(1.0)));
+    lines.push(hole_spacing_line(
+        board,
+        true,
+        floors.via_hole_spacing_mm.unwrap_or(0.20),
+    ));
+    lines.push(hole_spacing_line(
+        board,
+        false,
+        floors.pth_hole_spacing_mm.unwrap_or(0.45),
+    ));
+    lines.push(silk_width_line(
+        board,
+        floors.silk_stroke_mm.unwrap_or(0.15),
+    ));
+    lines.push(silk_height_line(
+        board,
+        floors.silk_height_mm.unwrap_or(1.0),
+    ));
+    lines.push(silk_pad_line(board, floors.silk_to_pad_mm.unwrap_or(0.15)));
     lines.push(pad_size_line(board));
     lines.push(hole_in_pad_line(board));
     lines.push(body_edge_line(board, spec));
     lines.push(body_spacing_line(board));
-    lines
+    Ok(lines)
 }
 
 struct Hit {
@@ -463,14 +495,15 @@ fn annular_line(board: &BoardGeometry, minimum: f64, recommended: Option<f64>) -
     )
 }
 
-fn via_diameter_line(board: &BoardGeometry) -> Line {
+fn via_diameter_line(board: &BoardGeometry, fail: f64, warn: Option<f64>) -> Line {
     let mut sites = Vec::new();
+    let skip = warn.unwrap_or(fail);
     for hole in holes(board).filter(|hole| hole.via) {
         let Some(pad) = via_pad(board, &hole) else {
             continue;
         };
         let extra = pad - hole.drill;
-        if extra + 1e-6 >= 0.15 {
+        if extra + 1e-6 >= skip {
             continue;
         }
         sites.push(Site {
@@ -485,21 +518,20 @@ fn via_diameter_line(board: &BoardGeometry) -> Line {
         "via-diameter",
         sites,
         Band {
-            fail_below: Some(0.10),
-            warn_below: Some(0.15),
+            fail_below: Some(fail),
+            warn_below: warn,
         },
         "via diameter above the hole",
     )
 }
 
-fn hole_size_line(board: &BoardGeometry) -> Line {
+fn hole_size_line(board: &BoardGeometry, fail_at: f64, via_warn: Option<f64>) -> Line {
     let mut sites = Vec::new();
     for hole in holes(board) {
         if hole.shape.pad_form == Some(PadForm::NonPlated) {
             continue;
         }
-        let fail_at = 0.15;
-        let warn_at = if hole.via { Some(0.20) } else { None };
+        let warn_at = if hole.via { via_warn } else { None };
         if !worse_than(
             hole.drill,
             Band {
@@ -524,20 +556,55 @@ fn hole_size_line(board: &BoardGeometry) -> Line {
         "plated-hole",
         sites,
         Band {
-            fail_below: Some(0.15),
-            warn_below: Some(0.20),
+            fail_below: Some(fail_at),
+            warn_below: via_warn,
         },
         "plated hole",
     )
 }
 
-fn hole_copper_lines(board: &BoardGeometry) -> Vec<Line> {
+fn hole_copper_lines(board: &BoardGeometry, floors: &Limits) -> Vec<Line> {
     let rules = [
-        ("via-hole-to-copper", true, false, true, 0.20, None),
-        ("pth-to-copper", false, true, true, 0.28, Some(0.35)),
-        ("npth-to-copper", false, false, true, 0.20, None),
-        ("inner-via-hole-to-copper", true, false, false, 0.20, None),
-        ("inner-pth-to-copper", false, true, false, 0.30, None),
+        (
+            "via-hole-to-copper",
+            true,
+            false,
+            true,
+            floors.via_hole_copper_mm.unwrap_or(0.20),
+            None,
+        ),
+        (
+            "pth-to-copper",
+            false,
+            true,
+            true,
+            floors.pth_hole_copper_outer_fail_mm.unwrap_or(0.28),
+            floors.pth_hole_copper_outer_warn_mm,
+        ),
+        (
+            "npth-to-copper",
+            false,
+            false,
+            true,
+            floors.npth_hole_copper_mm.unwrap_or(0.20),
+            None,
+        ),
+        (
+            "inner-via-hole-to-copper",
+            true,
+            false,
+            false,
+            floors.via_hole_copper_mm.unwrap_or(0.20),
+            None,
+        ),
+        (
+            "inner-pth-to-copper",
+            false,
+            true,
+            false,
+            floors.pth_hole_copper_inner_mm.unwrap_or(0.30),
+            None,
+        ),
     ];
     rules
         .into_iter()
@@ -611,7 +678,7 @@ fn hole_copper_lines(board: &BoardGeometry) -> Vec<Line> {
         .collect()
 }
 
-fn copper_edge_line(board: &BoardGeometry) -> Line {
+fn copper_edge_line(board: &BoardGeometry, minimum: f64) -> Line {
     let edges: Vec<&Shape> = board
         .shapes
         .iter()
@@ -642,7 +709,7 @@ fn copper_edge_line(board: &BoardGeometry) -> Line {
             }
             for edge in &edges {
                 let gap = boundary_gap(&shape.occupied, &edge.occupied);
-                if gap.distance + 1e-6 < 0.20 {
+                if gap.distance + 1e-6 < minimum {
                     sites.push(Site {
                         distance: gap.distance,
                         label: format!(
@@ -661,17 +728,17 @@ fn copper_edge_line(board: &BoardGeometry) -> Line {
         "copper-to-edge",
         sites,
         Band {
-            fail_below: Some(0.20),
+            fail_below: Some(minimum),
             warn_below: None,
         },
         "copper to board edge",
     )
 }
 
-fn npth_diameter_line(board: &BoardGeometry) -> Line {
+fn npth_diameter_line(board: &BoardGeometry, minimum: f64) -> Line {
     let mut sites = Vec::new();
     for hole in holes(board).filter(|hole| hole.shape.pad_form == Some(PadForm::NonPlated)) {
-        if hole.drill + 1e-6 >= 0.50 {
+        if hole.drill + 1e-6 >= minimum {
             continue;
         }
         sites.push(Site {
@@ -689,20 +756,20 @@ fn npth_diameter_line(board: &BoardGeometry) -> Line {
         "npth-diameter",
         sites,
         Band {
-            fail_below: Some(0.50),
+            fail_below: Some(minimum),
             warn_below: None,
         },
         "NPTH diameter",
     )
 }
 
-fn npth_annular_line(board: &BoardGeometry) -> Line {
+fn npth_annular_line(board: &BoardGeometry, minimum: f64) -> Line {
     let mut sites = Vec::new();
     for hole in holes(board).filter(|hole| hole.shape.pad_form == Some(PadForm::NonPlated)) {
         let Some(ring) = annular(board, &hole) else {
             continue;
         };
-        if ring + 1e-6 >= 0.45 {
+        if ring + 1e-6 >= minimum {
             continue;
         }
         sites.push(Site {
@@ -721,15 +788,14 @@ fn npth_annular_line(board: &BoardGeometry) -> Line {
         sites,
         Band {
             fail_below: None,
-            warn_below: Some(0.45),
+            warn_below: Some(minimum),
         },
         "NPTH annular ring",
     )
 }
 
-fn slot_line(board: &BoardGeometry, plated: bool) -> Line {
+fn slot_line(board: &BoardGeometry, plated: bool, minimum: f64) -> Line {
     let mut sites = Vec::new();
-    let minimum = if plated { 0.50 } else { 1.0 };
     for hole in holes(board) {
         let is_plated = hole.shape.pad_form == Some(PadForm::Through);
         if is_plated != plated {
@@ -780,7 +846,7 @@ fn slot_line(board: &BoardGeometry, plated: bool) -> Line {
     )
 }
 
-fn hole_spacing_line(board: &BoardGeometry, via: bool) -> Line {
+fn hole_spacing_line(board: &BoardGeometry, via: bool, minimum: f64) -> Line {
     let selected: Vec<Hole<'_>> = holes(board)
         .filter(|hole| {
             if via {
@@ -790,7 +856,6 @@ fn hole_spacing_line(board: &BoardGeometry, via: bool) -> Line {
             }
         })
         .collect();
-    let minimum = if via { 0.20 } else { 0.45 };
     let mut sites = Vec::new();
     for (index, hole) in selected.iter().enumerate() {
         for other in selected.iter().skip(index + 1) {
@@ -828,7 +893,7 @@ fn hole_spacing_line(board: &BoardGeometry, via: bool) -> Line {
     )
 }
 
-fn silk_width_line(board: &BoardGeometry) -> Line {
+fn silk_width_line(board: &BoardGeometry, minimum: f64) -> Line {
     let mut sites = Vec::new();
     for shape in &board.shapes {
         if !shape.layer.ends_with("SilkS") {
@@ -837,7 +902,7 @@ fn silk_width_line(board: &BoardGeometry) -> Line {
         let Some(width) = shape.width else {
             continue;
         };
-        if width <= 0.0 || width + 1e-6 >= 0.15 {
+        if width <= 0.0 || width + 1e-6 >= minimum {
             continue;
         }
         let at = interior(&shape.occupied);
@@ -858,19 +923,19 @@ fn silk_width_line(board: &BoardGeometry) -> Line {
         sites,
         Band {
             fail_below: None,
-            warn_below: Some(0.15),
+            warn_below: Some(minimum),
         },
         "silkscreen stroke",
     )
 }
 
-fn silk_height_line(board: &BoardGeometry) -> Line {
+fn silk_height_line(board: &BoardGeometry, minimum: f64) -> Line {
     let mut sites = Vec::new();
     for shape in &board.shapes {
         let Some(height) = shape.text_height_mm else {
             continue;
         };
-        if height + 1e-6 >= 1.0 {
+        if height + 1e-6 >= minimum {
             continue;
         }
         let at = interior(&shape.occupied);
@@ -890,13 +955,13 @@ fn silk_height_line(board: &BoardGeometry) -> Line {
         sites,
         Band {
             fail_below: None,
-            warn_below: Some(1.0),
+            warn_below: Some(minimum),
         },
         "silkscreen text height",
     )
 }
 
-fn silk_pad_line(board: &BoardGeometry) -> Line {
+fn silk_pad_line(board: &BoardGeometry, minimum: f64) -> Line {
     let pads: Vec<&Shape> = board
         .shapes
         .iter()
@@ -920,12 +985,12 @@ fn silk_pad_line(board: &BoardGeometry) -> Line {
             if window_gap(
                 outline_window(&silk.occupied),
                 outline_window(&pad.occupied),
-            ) > 0.15
+            ) > minimum
             {
                 continue;
             }
             let gap = filled_separation(&silk.occupied, &pad.occupied);
-            if gap.distance + 1e-6 >= 0.15 {
+            if gap.distance + 1e-6 >= minimum {
                 continue;
             }
             sites.push(Site {
@@ -946,7 +1011,7 @@ fn silk_pad_line(board: &BoardGeometry) -> Line {
         sites,
         Band {
             fail_below: None,
-            warn_below: Some(0.15),
+            warn_below: Some(minimum),
         },
         "silkscreen to pad",
     )
@@ -1579,7 +1644,8 @@ mod tests {
                 outer_copper_oz: None,
                 inner_copper_oz: None,
             },
-        );
+        )
+        .unwrap();
         let spacing = lines
             .iter()
             .find(|line| line.name == "smd-pad-spacing")
@@ -1591,6 +1657,31 @@ mod tests {
             .find(|line| line.name == "plated-slot")
             .unwrap();
         assert_eq!(slots.status, TestStatus::Passed);
+    }
+
+    #[test]
+    fn a_two_layer_one_ounce_board_uses_a_0_10_mm_track_floor() {
+        let board = BoardGeometry {
+            copper_layers: vec!["F.Cu".into(), "B.Cu".into()],
+            outer_copper_mm: Some(0.035),
+            inner_copper_mm: None,
+            footprints: Vec::new(),
+            shapes: Vec::new(),
+        };
+        let floors = floors(
+            &board,
+            &Spec {
+                project: "board.kicad_pro".into(),
+                mask_color: "green".into(),
+                rails: Vec::new(),
+                allow_overhang: Vec::new(),
+                outer_copper_oz: None,
+                inner_copper_oz: None,
+            },
+        )
+        .unwrap();
+        assert!((floors.track_width_mm - 0.10).abs() < 1e-9);
+        assert!((floors.track_space_mm - 0.10).abs() < 1e-9);
     }
 
     #[test]

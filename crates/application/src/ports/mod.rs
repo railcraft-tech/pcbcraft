@@ -1,6 +1,7 @@
 mod board;
 mod component_store;
 mod drawing_renderer;
+mod easyeda;
 mod fabrication;
 mod net_graph;
 mod part_cards;
@@ -11,6 +12,7 @@ mod test_printer;
 pub use board::BoardSource;
 pub use component_store::{ComponentStore, Usage};
 pub use drawing_renderer::DrawingRenderer;
+pub use easyeda::{CadDocument, EasyedaCad, FootprintStore, SavedFootprint};
 pub use fabrication::Fabrication;
 pub use net_graph::NetGraphSource;
 pub use part_cards::PartCards;

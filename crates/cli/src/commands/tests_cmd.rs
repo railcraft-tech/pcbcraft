@@ -12,7 +12,7 @@ use pcbcraft_domain::validate::TestFile;
 use pcbcraft_kicad::{KiCad, ProjectCards};
 use pcbcraft_suppliers::{LcscCatalog, PcbwayCatalog};
 
-use super::args::{InitTypeArgs, RunArgs, TestsDir};
+use super::args::{InitTypeArgs, RunArgs, SingleRunArgs, TestsDir};
 use super::output::{place, CommandOutput};
 use crate::printer::{memory_label, ConsolePrinter};
 
@@ -30,6 +30,19 @@ pub fn init_defaults(cwd: &Path, args: &TestsDir) -> CommandOutput {
 
 pub fn init_type(cwd: &Path, args: &InitTypeArgs) -> CommandOutput {
     CommandOutput::from_result(init_type_result(cwd, args))
+}
+
+pub fn single_run(cwd: &Path, args: &SingleRunArgs, color: bool) -> CommandOutput {
+    CommandOutput::from_result(single_run_result(cwd, args, color))
+}
+
+/// Store a piped spec, including an empty pipe, so the command can reject it.
+pub fn read_piped_spec(args: &mut SingleRunArgs, piped: Option<String>) -> Result<()> {
+    let Some(text) = piped else {
+        return Ok(());
+    };
+    args.stdin_json = Some(text);
+    Ok(())
 }
 
 fn run_result(cwd: &Path, args: &RunArgs, color: bool) -> Result<CommandOutput> {
@@ -70,13 +83,72 @@ fn run_result(cwd: &Path, args: &RunArgs, color: bool) -> Result<CommandOutput> 
             Err(err) => parse_errors.push(format!("{name}: {err}")),
         }
     }
-    let mut stdout = Vec::new();
-    let mut printer = ConsolePrinter::new(&mut stdout, color);
     if !parse_errors.is_empty() {
+        let mut stdout = Vec::new();
+        let mut printer = ConsolePrinter::new(&mut stdout, color);
         printer.schema_errors(&parse_errors);
         drop(printer);
         return Ok(CommandOutput::status(2, utf8(stdout), ""));
     }
+    execute(cwd, tests, color)
+}
+
+fn single_run_result(cwd: &Path, args: &SingleRunArgs, color: bool) -> Result<CommandOutput> {
+    let test = match load_single(cwd, args) {
+        Ok(test) => test,
+        Err(output) => return Ok(output),
+    };
+    execute(cwd, vec![test], color)
+}
+
+fn load_single(cwd: &Path, args: &SingleRunArgs) -> Result<LoadedTest, CommandOutput> {
+    if !known_types().contains(&args.type_name.as_str()) {
+        return Err(CommandOutput::error(
+            2,
+            format!("unknown test type '{}'\n", args.type_name),
+        ));
+    }
+    let mut spec = match spec_object(args) {
+        Ok(spec) => spec,
+        Err(message) => return Err(CommandOutput::error(2, message)),
+    };
+    absolutize_project(cwd, &mut spec);
+    Ok(LoadedTest {
+        name: args.type_name.clone(),
+        type_name: args.type_name.clone(),
+        spec,
+    })
+}
+
+fn spec_object(args: &SingleRunArgs) -> Result<serde_json::Value, String> {
+    match (&args.stdin_json, &args.spec) {
+        (Some(_), Some(_)) => Err("pass the test spec on stdin or as spec, not both\n".into()),
+        (Some(text), None) => parse_spec_text(text),
+        (None, Some(value)) => {
+            if value.is_object() {
+                Ok(value.clone())
+            } else {
+                Err("test spec must be a JSON object\n".into())
+            }
+        }
+        (None, None) => Err("pass the test spec as JSON on stdin\n".into()),
+    }
+}
+
+fn parse_spec_text(text: &str) -> Result<serde_json::Value, String> {
+    if text.trim().is_empty() {
+        return Err("pass the test spec as JSON on stdin\n".into());
+    }
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) if value.is_object() => Ok(value),
+        Ok(_) => Err("test spec must be a JSON object\n".into()),
+        Err(err) => Err(format!("test spec: {err}\n")),
+    }
+}
+
+fn execute(cwd: &Path, tests: Vec<LoadedTest>, color: bool) -> Result<CommandOutput> {
+    let mut stdout = Vec::new();
+    let mut printer = ConsolePrinter::new(&mut stdout, color);
     let kicad = KiCad::from_env();
     let stock = LiveStock {
         lcsc: LcscCatalog::default(),
@@ -256,6 +328,12 @@ fn discover_project(cwd: &Path) -> Result<Option<PathBuf>> {
 }
 
 fn absolutize(json_path: &Path, spec: &mut serde_json::Value) {
+    if let Some(parent) = json_path.parent() {
+        absolutize_project(parent, spec);
+    }
+}
+
+fn absolutize_project(base: &Path, spec: &mut serde_json::Value) {
     let Some(project) = spec.get("project").and_then(|value| value.as_str()) else {
         return;
     };
@@ -263,10 +341,7 @@ fn absolutize(json_path: &Path, spec: &mut serde_json::Value) {
     if path.is_absolute() {
         return;
     }
-    if let Some(parent) = json_path.parent() {
-        let absolute = parent.join(path);
-        spec["project"] = serde_json::Value::String(absolute.display().to_string());
-    }
+    spec["project"] = serde_json::Value::String(base.join(path).display().to_string());
 }
 
 pub fn keep_named(files: &mut Vec<(String, PathBuf)>, name: &str) -> String {
@@ -346,8 +421,10 @@ pub fn format_test_list(
 #[cfg(test)]
 mod tests {
     use super::{format_test_list, keep_named};
+    use crate::commands::args::SingleRunArgs;
     use pcbcraft_application::validate::{known_types, order, LoadedTest};
-    use std::path::PathBuf;
+    use serde_json::json;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn the_list_puts_project_tests_above_the_known_types() {
@@ -404,5 +481,87 @@ DRCValidator
         assert_eq!(wanted, "erc-test");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].0, "erc-test");
+    }
+
+    #[test]
+    fn a_missing_or_non_object_spec_is_a_setup_error() {
+        let missing = SingleRunArgs {
+            type_name: "ERCValidator".into(),
+            spec: None,
+            stdin_json: None,
+        };
+        let output = super::single_run(Path::new("."), &missing, false);
+        assert_eq!(output.code, 2);
+        assert!(output.stderr.contains("stdin"), "{}", output.stderr);
+
+        let mut empty = SingleRunArgs {
+            type_name: "ERCValidator".into(),
+            spec: None,
+            stdin_json: None,
+        };
+        super::read_piped_spec(&mut empty, Some(" \n".into())).unwrap();
+        let output = super::single_run(Path::new("."), &empty, false);
+        assert_eq!(output.code, 2, "{}", output.stderr);
+        assert!(output.stderr.contains("stdin"), "{}", output.stderr);
+
+        let array = SingleRunArgs {
+            type_name: "ERCValidator".into(),
+            spec: None,
+            stdin_json: Some("[1]".into()),
+        };
+        let output = super::single_run(Path::new("."), &array, false);
+        assert_eq!(output.code, 2, "{}", output.stderr);
+        assert!(output.stderr.contains("object"), "{}", output.stderr);
+
+        let broken = SingleRunArgs {
+            type_name: "ERCValidator".into(),
+            spec: None,
+            stdin_json: Some("{".into()),
+        };
+        let output = super::single_run(Path::new("."), &broken, false);
+        assert_eq!(output.code, 2, "{}", output.stderr);
+        assert!(output.stderr.contains("test spec"), "{}", output.stderr);
+
+        let both = SingleRunArgs {
+            type_name: "ERCValidator".into(),
+            spec: Some(json!({"project": "a.kicad_pro"})),
+            stdin_json: Some(r#"{"project":"a.kicad_pro"}"#.into()),
+        };
+        let output = super::single_run(Path::new("."), &both, false);
+        assert_eq!(output.code, 2, "{}", output.stderr);
+        assert!(output.stderr.contains("not both"), "{}", output.stderr);
+    }
+
+    #[test]
+    fn a_relative_project_is_joined_to_the_working_directory() {
+        let relative = SingleRunArgs {
+            type_name: "ERCValidator".into(),
+            spec: Some(json!({"project": "board.kicad_pro"})),
+            stdin_json: None,
+        };
+        let loaded = super::load_single(Path::new("/boards/radio"), &relative).unwrap();
+        assert_eq!(loaded.name, "ERCValidator");
+        assert_eq!(loaded.type_name, "ERCValidator");
+        assert_eq!(loaded.spec["project"], "/boards/radio/board.kicad_pro");
+
+        let absolute = SingleRunArgs {
+            type_name: "ERCValidator".into(),
+            spec: Some(json!({"project": "/abs/board.kicad_pro"})),
+            stdin_json: None,
+        };
+        let loaded = super::load_single(Path::new("/boards/radio"), &absolute).unwrap();
+        assert_eq!(loaded.spec["project"], "/abs/board.kicad_pro");
+    }
+
+    #[test]
+    fn an_unknown_type_is_a_setup_error() {
+        let args = SingleRunArgs {
+            type_name: "Nope".into(),
+            spec: Some(json!({"project": "a.kicad_pro"})),
+            stdin_json: None,
+        };
+        let output = super::single_run(Path::new("."), &args, false);
+        assert_eq!(output.code, 2, "{}", output.stderr);
+        assert!(output.stderr.contains("Nope"), "{}", output.stderr);
     }
 }

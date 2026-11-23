@@ -33,6 +33,7 @@ fn the_server_lists_every_command_and_rejects_an_empty_test_directory() {
     );
     let listed = read_line(&mut stdout);
     for name in [
+        "board_setup",
         "export_bom",
         "export_pos",
         "export_cpl",
@@ -43,8 +44,11 @@ fn the_server_lists_every_command_and_rejects_an_empty_test_directory() {
         "tests_list",
         "tests_init_defaults",
         "tests_init_type",
+        "tests_single_run",
         "parts_alternatives",
         "parts_search",
+        "parts_download_model",
+        "parts_download_datasheet",
         "components_sync",
         "components_show",
         "net_dump",

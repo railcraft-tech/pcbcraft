@@ -6,6 +6,22 @@
 
 `pcbcraft tests list` prints the files, then the types this program can run.
 
+## One run
+
+`pcbcraft tests single-run ResistorPower` reads the spec JSON from stdin and does not write a file. `project` is relative to the current directory. A check without subtests is named after the type. Exit codes match `tests run`.
+
+```text
+pcbcraft tests single-run ResistorPower <<'EOF'
+{
+  "project": "board.kicad_pro",
+  "rails": {
+    "+3V3": { "min": "3.0V", "max": "3.6V" },
+    "GND": { "min": "0V", "max": "0V" }
+  }
+}
+EOF
+```
+
 ## Create
 
 `pcbcraft tests init defaults` writes `erc-test.json`, `drc-test.json`, and `availability-test.json` when they are missing. The availability file sets `defaultMinimum` to 10. Omitting that field later means 100. One `.kicad_pro` in the current directory is written into `spec.project` as a path relative to the JSON file. Zero or several projects leave `project.kicad_pro` for you to set.

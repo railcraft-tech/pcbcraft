@@ -39,6 +39,12 @@ An LCSC electrical parameter is a `min`/`max` pair or a list. A bare number is r
 
 `package` and `manufacturer` filter those fields. Every other key is a product attribute, spelled the way the catalog prints it. A bare number is rejected. The same object is the `attributes` argument of `parts_search`.
 
+## Datasheet
+
+`pcbcraft parts download-datasheet --supplier lcsc C55266 --output-dir=datasheets/C55266`
+
+Writes `datasheet.md`, `datasheet.pdf`, `images/`, and `extra/` in that directory. `supplier` is `lcsc`. The same fields are the `parts_download_datasheet` arguments.
+
 ## Report JSON
 
 `pcbcraft tests run` prints a text summary. A validator `Report` contains:

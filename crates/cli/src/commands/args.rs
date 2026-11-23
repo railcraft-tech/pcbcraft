@@ -21,6 +21,10 @@ fn default_limit() -> usize {
     10
 }
 
+fn default_mask() -> String {
+    "green".into()
+}
+
 #[derive(Debug, Args, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileArgs {
@@ -153,6 +157,21 @@ pub struct InitTypeArgs {
     pub directory: Option<PathBuf>,
 }
 
+#[derive(Debug, Args, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SingleRunArgs {
+    /// Validator type.
+    #[arg(value_parser = known_type_names(), hide_possible_values = true)]
+    pub type_name: String,
+    /// Test spec. The CLI reads this from stdin. MCP passes the object.
+    #[arg(skip)]
+    #[serde(default)]
+    pub spec: Option<Value>,
+    #[arg(skip)]
+    #[serde(skip)]
+    pub stdin_json: Option<String>,
+}
+
 pub fn known_type_names() -> PossibleValuesParser {
     PossibleValuesParser::new(known_types().iter().copied())
 }
@@ -237,12 +256,58 @@ pub struct SyncArgs {
 
 #[derive(Debug, Args, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct BoardSetupArgs {
+    /// `jlcpcb`, `pcbway`, or `custom`.
+    pub profile: String,
+    /// JSON profile. Required when the profile is `custom`.
+    #[serde(default)]
+    pub file: Option<PathBuf>,
+    /// A .kicad_pro, .kicad_sch, or .kicad_pcb file.
+    #[serde(default)]
+    pub input: Option<PathBuf>,
+    /// Solder-mask color used to pick the mask row. Defaults to green.
+    #[arg(long, default_value = "green")]
+    #[serde(default = "default_mask")]
+    pub mask: String,
+}
+
+#[derive(Debug, Args, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShowArgs {
     /// LCSC or PCBWay catalog number, for example C12345.
     pub part: String,
     /// A .kicad_pro, .kicad_sch, or .kicad_pcb file.
     #[serde(default)]
     pub input: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatasheetArgs {
+    /// `lcsc` reads the LCSC product page.
+    #[arg(long)]
+    pub supplier: String,
+    /// LCSC number, for example C55266.
+    pub part: String,
+    /// Directory for datasheet.md, datasheet.pdf, images, and extra.
+    #[arg(long)]
+    pub output_dir: PathBuf,
+}
+
+#[derive(Debug, Args, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadArgs {
+    /// LCSC part number, for example C2040.
+    #[arg(required = true)]
+    pub lcsc: Vec<String>,
+    /// Directory that will contain EasyEDA.pretty and EasyEDA.3dshapes. Defaults to .pcbcraft.
+    #[arg(long)]
+    #[serde(default)]
+    pub library: Option<PathBuf>,
+    /// KiCad project whose fp-lib-table gains the EasyEDA library.
+    #[arg(long)]
+    #[serde(default)]
+    pub project: Option<PathBuf>,
 }
 
 #[derive(Debug, Args, Deserialize)]

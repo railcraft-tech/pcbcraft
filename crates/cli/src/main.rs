@@ -6,14 +6,16 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::commands::args::{
-    type_list_help, AltArgs, CplArgs, DrawingArgs, FileArgs, InitTypeArgs, NetDumpArgs, RunArgs,
-    SearchArgs, ShowArgs, SyncArgs, TestsDir, TwoDArgs,
+    type_list_help, AltArgs, CplArgs, DatasheetArgs, DownloadArgs, DrawingArgs, FileArgs,
+    InitTypeArgs, NetDumpArgs, RunArgs, SearchArgs, ShowArgs, SingleRunArgs, SyncArgs, TestsDir,
+    TwoDArgs,
 };
 use crate::commands::output::CommandOutput;
 
 mod commands;
 mod geometry_cmd;
 mod net_dump;
+mod pdf2md;
 mod printer;
 mod show_part;
 
@@ -35,6 +37,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// KiCad board settings.
+    Board {
+        #[command(subcommand)]
+        kind: BoardKind,
+    },
     /// Manufacturing export.
     Export {
         #[command(subcommand)]
@@ -67,6 +74,45 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum BoardKind {
+    /// Apply a fabrication profile so KiCad DRC uses the fab floors.
+    Setup {
+        #[command(subcommand)]
+        profile: SetupProfile,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetupProfile {
+    /// JLCPCB capability floors.
+    Jlcpcb(SetupTarget),
+    /// PCBWay standard-review floors.
+    Pcbway(SetupTarget),
+    /// A JSON file with the same fields as the built-in profiles.
+    Custom(CustomSetup),
+}
+
+#[derive(Args)]
+struct SetupTarget {
+    /// A .kicad_pro, .kicad_sch, or .kicad_pcb file.
+    input: Option<std::path::PathBuf>,
+    /// Solder-mask color. Defaults to green.
+    #[arg(long, default_value = "green")]
+    mask: String,
+}
+
+#[derive(Args)]
+struct CustomSetup {
+    /// Path to the JSON profile.
+    file: std::path::PathBuf,
+    /// A .kicad_pro, .kicad_sch, or .kicad_pcb file.
+    input: Option<std::path::PathBuf>,
+    /// Solder-mask color. Defaults to green.
+    #[arg(long, default_value = "green")]
+    mask: String,
+}
+
+#[derive(Subcommand)]
 enum ExportKind {
     /// JLCPCB-shaped bill of materials.
     Bom(FileArgs),
@@ -90,6 +136,10 @@ enum PartsKind {
     Alternatives(AltArgs),
     /// Search the JLCPCB assembly catalog.
     Search(SearchArgs),
+    /// Download an EasyEDA footprint and 3D model.
+    DownloadModel(DownloadArgs),
+    /// Download an LCSC datasheet as markdown.
+    DownloadDatasheet(DatasheetArgs),
 }
 
 #[derive(Subcommand)]
@@ -106,6 +156,9 @@ enum TestsKind {
     Run(RunArgs),
     /// List the tests in the directory, then the types this program can run.
     List(TestsDir),
+    /// Run one test type from a spec on stdin. Does not write a file.
+    #[command(after_help = type_list_help())]
+    SingleRun(SingleRunArgs),
     /// Create test files.
     Init(InitArgs),
 }
@@ -150,6 +203,31 @@ fn run() -> Result<()> {
     let cwd = std::env::current_dir().context("current directory")?;
     let color = io::stdout().is_terminal();
     match Cli::parse().command {
+        Command::Board { kind } => match kind {
+            BoardKind::Setup { profile } => {
+                let args = match profile {
+                    SetupProfile::Jlcpcb(target) => commands::args::BoardSetupArgs {
+                        profile: "jlcpcb".into(),
+                        file: None,
+                        input: target.input,
+                        mask: target.mask,
+                    },
+                    SetupProfile::Pcbway(target) => commands::args::BoardSetupArgs {
+                        profile: "pcbway".into(),
+                        file: None,
+                        input: target.input,
+                        mask: target.mask,
+                    },
+                    SetupProfile::Custom(target) => commands::args::BoardSetupArgs {
+                        profile: "custom".into(),
+                        file: Some(target.file),
+                        input: target.input,
+                        mask: target.mask,
+                    },
+                };
+                emit(commands::board::setup(&cwd, &args))
+            }
+        },
         Command::Export { kind } => match kind {
             ExportKind::Bom(args) => emit(commands::export::bom(&cwd, &args)),
             ExportKind::Pos(args) => emit(commands::export::pos(&cwd, &args)),
@@ -161,6 +239,17 @@ fn run() -> Result<()> {
         Command::Tests { kind } => match kind {
             TestsKind::Run(args) => emit(commands::tests_cmd::run(&cwd, &args, color)),
             TestsKind::List(args) => emit(commands::tests_cmd::list(&cwd, &args)),
+            TestsKind::SingleRun(mut args) => {
+                let piped = if io::stdin().is_terminal() {
+                    None
+                } else {
+                    let mut text = String::new();
+                    io::stdin().read_to_string(&mut text)?;
+                    Some(text)
+                };
+                commands::tests_cmd::read_piped_spec(&mut args, piped)?;
+                emit(commands::tests_cmd::single_run(&cwd, &args, color))
+            }
             TestsKind::Init(args) => match args.kind {
                 InitKind::Defaults(args) => emit(commands::tests_cmd::init_defaults(&cwd, &args)),
                 InitKind::Type(args) => emit(commands::tests_cmd::init_type(&cwd, &args)),
@@ -178,6 +267,10 @@ fn run() -> Result<()> {
                 };
                 commands::parts::read_piped_attributes(&mut args, piped)?;
                 emit(commands::parts::search(&cwd, &args))
+            }
+            PartsKind::DownloadModel(args) => emit(commands::parts::download(&cwd, &args, color)),
+            PartsKind::DownloadDatasheet(args) => {
+                emit(commands::parts::download_datasheet(&cwd, &args))
             }
         },
         Command::Components { kind } => match kind {
@@ -228,6 +321,42 @@ mod tests {
     }
 
     #[test]
+    fn single_run_help_lists_every_known_type() {
+        let mut command = super::Cli::command();
+        let tests = command.find_subcommand_mut("tests").unwrap();
+        let single = tests.find_subcommand_mut("single-run").unwrap();
+        let mut buffer = Vec::new();
+        single.write_long_help(&mut buffer).unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(text.contains("Known types:"), "{text}");
+        for name in known_types() {
+            assert!(text.contains(name), "{name} missing from:\n{text}");
+        }
+    }
+
+    #[test]
+    fn single_run_parses_a_known_type_and_rejects_an_unknown_one() {
+        let cli = super::Cli::try_parse_from(["pcbcraft", "tests", "single-run", "ERCValidator"])
+            .unwrap();
+        match cli.command {
+            super::Command::Tests {
+                kind: super::TestsKind::SingleRun(args),
+            } => {
+                assert_eq!(args.type_name, "ERCValidator");
+                assert!(args.spec.is_none());
+            }
+            _ => panic!("expected single-run"),
+        }
+        let err = match super::Cli::try_parse_from(["pcbcraft", "tests", "single-run", "NotAType"])
+        {
+            Err(err) => err,
+            Ok(_) => panic!("unknown type was accepted"),
+        };
+        let text = err.to_string();
+        assert!(text.contains("NotAType"), "{text}");
+    }
+
+    #[test]
     fn omitted_render_fields_match_the_flag_defaults() {
         let args: crate::commands::args::TwoDArgs = serde_json::from_str("{}").unwrap();
         assert_eq!(args.side, "front");
@@ -267,6 +396,36 @@ mod tests {
                 assert_eq!(args.params, Some(PathBuf::from("params.json")));
             }
             _ => panic!("expected parts search"),
+        }
+    }
+
+    #[test]
+    fn parts_download_datasheet_reads_the_supplier_part_and_directory() {
+        use std::path::PathBuf;
+
+        let cli = super::Cli::try_parse_from([
+            "pcbcraft",
+            "parts",
+            "download-datasheet",
+            "--supplier",
+            "lcsc",
+            "C55266",
+            "--output-dir",
+            "context/datasheets/C55266-TPS2553DBVR",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Command::Parts {
+                kind: super::PartsKind::DownloadDatasheet(args),
+            } => {
+                assert_eq!(args.supplier, "lcsc");
+                assert_eq!(args.part, "C55266");
+                assert_eq!(
+                    args.output_dir,
+                    PathBuf::from("context/datasheets/C55266-TPS2553DBVR")
+                );
+            }
+            _ => panic!("expected parts download-datasheet"),
         }
     }
 }

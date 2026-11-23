@@ -16,6 +16,7 @@ Connecting with GitHub Actions you can monitor components availability more freq
 - PCB unit tests with `pcbcraft tests run`
 - Alternative parts search, matching by min-max, and list of parameters
 - JLCPCB catalog search by keyword and product attributes (`pcbcraft parts search`)
+- LCSC datasheet download as markdown with local figures (`pcbcraft parts download-datasheet`)
 - Fetching BOM from external APIs (e.g. JLCPCB/LCSC) for quick parameters inspection
 - NETs analysis
 - Finding components on the board, describing, taking pictures of single components
@@ -23,6 +24,7 @@ Connecting with GitHub Actions you can monitor components availability more freq
 - Exporting to JLCPCB with correcting positions and rotations in CPL file (KiCad by default exports positions that are wrongly interpreted by JLCPCB and needs to be corrected). Partially the positions are corrected automatically, the rest you can adjust with a YAML file
 - Integrated MCP
 - JLCPCB DFM check made locally as part of a unit test to better prepare board for the order
+- `pcbcraft board setup` raises KiCad design rules to JLCPCB, PCBWay, or a custom JSON profile before fabrication
 - CLI can be embedded as a GitHub Actions step for constantly checking your board for breaking changes, missing components on the supplier side
 - A4 2D 1:1 printing for physical THT components placement check (`pcbcraft export drawing`)
 
@@ -41,11 +43,17 @@ pcbcraft geometry find-symbol J1
 pcbcraft geometry is-occupied
 pcbcraft geometry dump
 pcbcraft tests run
+pcbcraft tests single-run ERCValidator
 pcbcraft parts alternatives spec.yaml
 pcbcraft parts search --supplier jlcpcb --query resistor -p package=0805 -p Resistance=10kΩ
+pcbcraft parts download-model C2040 --project board.kicad_pro
+pcbcraft parts download-datasheet --supplier lcsc C55266 --output-dir=datasheets/C55266
 pcbcraft components sync <project.kicad_pro>
 pcbcraft components show C12345
 pcbcraft net GND dump
+pcbcraft board setup jlcpcb
+pcbcraft board setup pcbway
+pcbcraft board setup custom profile.json
 pcbcraft mcp
 ```
 
